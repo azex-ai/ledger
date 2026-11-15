@@ -34,9 +34,9 @@ jobs:
       # internal to the root module and covered by the root commands above.
       - run: go vet ./...
         working-directory: anchors/r2/internal/s3test
-      # The Object Lock test behind `s3worm` (run by the test job) must at
+      # The `s3server` files (run by the test job against MinIO) must at
       # least compile here, where no S3 server exists.
-      - run: go vet -tags s3worm ./...
+      - run: go vet -tags s3server ./...
         working-directory: anchors/r2
       # F-M5 (2026-09-02 audit): chains/evm/e2e_test.go and e2e_artifacts.go
       # carry `//go:build e2e` and were not compiled by ANY step anywhere in
@@ -57,6 +57,13 @@ jobs:
         with:
           version: v2.12.2
           working-directory: anchors/r2
+      # Again with -tags s3server: the real-S3-server fixture and the Object
+      # Lock test, which the plain run above never sees.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: anchors/r2
+          args: --build-tags=s3server
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
@@ -113,16 +120,16 @@ jobs:
       - name: Test anchors/r2
         run: go test -race -timeout 15m -count=1 ./...
         working-directory: anchors/r2
-      # anchors/r2's Object Lock (WORM) assertion is behind `-tags s3worm`
-      # because it needs a real S3 server with Object Lock; every other r2 test
-      # runs against the in-process fake (internal/s3test). Locally it is
-      # `make test-r2-worm` against a native MinIO (docs/TESTING.md); here the
+      # `-tags s3server` runs every anchors/r2 test against a real S3 server,
+      # plus the Object Lock (WORM) test that the in-process fake used by the
+      # plain run (internal/s3test) cannot serve. Locally it is
+      # `make test-r2-s3server` against a native MinIO (docs/TESTING.md); here the
       # server is a container. pgsty/minio is a community build of the archived
       # MinIO source (minio/minio left Docker Hub in September 2026), pinned to
       # a dated release tag AND its multi-arch OCI index digest so the bytes CI
       # runs are fixed; re-derive the digest with
       # `docker buildx imagetools inspect pgsty/minio:<tag>` (top-level Digest).
-      - name: Start MinIO for the anchors/r2 Object Lock test
+      - name: Start MinIO for the anchors/r2 real-server tests
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
@@ -133,8 +140,8 @@ jobs:
           done
           docker logs minio
           exit 1
-      - name: Test anchors/r2 Object Lock (s3worm)
-        run: go test -tags s3worm -race -timeout 5m -count=1 -run TestAnchor_ObjectLock ./...
+      - name: Test anchors/r2 against MinIO (s3server)
+        run: go test -tags s3server -race -timeout 5m -count=1 ./...
         working-directory: anchors/r2
       # F-m3 (2026-09-02 audit): docs/INVARIANTS.md's own "How to add a new
       # invariant" rule #5 says a fuzz-target pin gets run for a few seconds

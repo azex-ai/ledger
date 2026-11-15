@@ -1,4 +1,4 @@
-.PHONY: build test test-clean-db test-short test-submodules test-r2-worm test-e2e test-consumer vet lint sqlc sqlc-diff db db-docker openapi-check
+.PHONY: build test test-clean-db test-short test-submodules test-r2-s3server test-e2e test-consumer vet lint sqlc sqlc-diff db db-docker openapi-check
 
 build:
 	go build ./...
@@ -19,7 +19,8 @@ test-consumer:
 # PostgreSQL: one server, no Docker. The integration tests connect to
 # DATABASE_URL, or by default to the shared local instance
 # postgres://dev:dev@127.0.0.1:5432/postgres (internal/pgtestenv), and isolate
-# by database name -- every test creates and drops its own -- and, for the
+# by database name -- every test gets its own copy of its process's migrated
+# template database and drops it; the templates go at cleanup -- and, for the
 # destructive full-migration roundtrip, by role name (docs/TESTING.md). An
 # unreachable server FAILS the run (F-9, 2026-09-03 independent review: a
 # suite that did not execute is not a suite that passed); `make test-short` is
@@ -50,14 +51,15 @@ test-submodules:
 	cd chains/evm && go test -race -timeout 15m -count=1 ./...
 	cd anchors/r2 && go test -race -timeout 15m -count=1 ./...
 
-# anchors/r2's Object Lock (WORM) assertion, behind `//go:build s3worm`: it
-# needs a REAL S3-compatible server with Object Lock (MinIO, or R2), which the
-# in-process fake every other r2 test uses does not implement.
-# LEDGER_TEST_S3_ENDPOINT / _ACCESS_KEY_ID / _SECRET_ACCESS_KEY select the
-# server (default: MinIO on http://127.0.0.1:9000, minioadmin/minioadmin); an
+# anchors/r2 against a REAL S3-compatible server (`-tags s3server`): every r2
+# test, each in its own bucket deleted afterwards, plus the Object Lock (WORM)
+# test that the in-process fake used by `test-submodules` cannot serve. The
+# server must implement versioning and Object Lock (MinIO does).
+# LEDGER_TEST_S3_ENDPOINT / _ACCESS_KEY_ID / _SECRET_ACCESS_KEY select it
+# (default: MinIO on http://127.0.0.1:9000, minioadmin/minioadmin); an
 # unreachable server fails the run. docs/TESTING.md.
-test-r2-worm:
-	cd anchors/r2 && go test -tags s3worm -race -timeout 5m -count=1 -run TestAnchor_ObjectLock ./...
+test-r2-s3server:
+	cd anchors/r2 && go test -tags s3server -race -timeout 5m -count=1 ./...
 
 # chains/evm/e2e_test.go and e2e_artifacts.go carry `//go:build e2e` and are
 # excluded from every other target above -- `go build`/`go vet`/`go test`

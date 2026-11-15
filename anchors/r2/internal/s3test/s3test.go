@@ -18,8 +18,8 @@
 // What this server does NOT implement is Object Lock (bucket lock
 // configuration, retention, refusing to delete a retained version). That
 // guarantee is a property of the real server, not of anchors/r2's code, so
-// it is asserted against a real S3-compatible server by the `s3worm`-tagged
-// test in anchors/r2 (`make test-r2-worm`, docs/TESTING.md), never against
+// it is asserted against a real S3-compatible server by the `s3server`-tagged
+// test in anchors/r2 (`make test-r2-s3server`, docs/TESTING.md), never against
 // this fake.
 package s3test
 

@@ -14,25 +14,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/azex-ai/ledger/anchors/r2"
-	"github.com/azex-ai/ledger/anchors/r2/internal/s3test"
 	"github.com/azex-ai/ledger/anchortest"
 	"github.com/azex-ai/ledger/core"
 )
-
-// createBucket creates a plain bucket on the in-process fake server
-// (internal/s3test). The fake has no Object Lock; the tests in this file
-// exercise anchors/r2's own logic -- create-only publishing, the listing,
-// the fail-closed parse -- which does not depend on it. The WORM guarantee
-// the production bucket adds (docs/RUNBOOK.md) is a property of the real
-// server and is asserted against one in r2_worm_test.go (`s3worm` build tag,
-// `make test-r2-worm`).
-func createBucket(t *testing.T, endpoint, accessKey, secret, bucket string) {
-	t.Helper()
-	client := newRawClient(endpoint, accessKey, secret)
-	if _, err := client.CreateBucket(context.Background(), &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
-}
 
 // newRawClient is the "attacker's" client: the same S3 API this package
 // speaks, used directly, without going through Publish. This is what makes
@@ -50,9 +34,7 @@ func newRawClient(endpoint, accessKey, secret string) *s3.Client {
 const testPrefix = "anchor/head"
 
 func TestAnchor_Conformance(t *testing.T) {
-	endpoint, accessKey, secret := s3test.Fixture(t)
-	const bucket = "ledger-anchor-conformance"
-	createBucket(t, endpoint, accessKey, secret, bucket)
+	endpoint, accessKey, secret, bucket := testBucket(t)
 
 	newAnchor := func() core.Anchor {
 		a, err := r2.New(r2.Config{
@@ -131,9 +113,7 @@ func TestNew_ValidatesConfig(t *testing.T) {
 //     overwritten;
 //   - re-publishing it with identical bytes is an idempotent success.
 func TestAnchor_PublishIsCreateOnlyPerSeq(t *testing.T) {
-	endpoint, accessKey, secret := s3test.Fixture(t)
-	const bucket = "ledger-anchor-create-only"
-	createBucket(t, endpoint, accessKey, secret, bucket)
+	endpoint, accessKey, secret, bucket := testBucket(t)
 
 	a, err := r2.New(r2.Config{
 		Endpoint:        endpoint,
@@ -187,9 +167,7 @@ func TestAnchor_PublishIsCreateOnlyPerSeq(t *testing.T) {
 // confident number. Silently skipping it would mean answering "the head is
 // 2" about a prefix somebody else is also writing to.
 func TestAnchor_HeadFailsClosedOnAForeignObject(t *testing.T) {
-	endpoint, accessKey, secret := s3test.Fixture(t)
-	const bucket = "ledger-anchor-foreign-object"
-	createBucket(t, endpoint, accessKey, secret, bucket)
+	endpoint, accessKey, secret, bucket := testBucket(t)
 
 	a, err := r2.New(r2.Config{
 		Endpoint:        endpoint,

@@ -7,7 +7,7 @@ package core_test
 //     instead of sharing them, and fell behind (missing lint, sqlc-diff,
 //     govulncheck, both submodules) without anything noticing.
 //   - go.work lists five workspace modules; two (internal/postgrestest,
-//     anchors/r2/internal/miniotest, now internal/s3test) had zero go vet/lint/build coverage in
+//     anchors/r2/internal/miniotest -- now internal/s3test) had zero go vet/lint/build coverage in
 //     ci.yml, and nothing would have caught a sixth module added the same
 //     way.
 //   - chains/evm/e2e_test.go's `//go:build e2e` tag was never passed by any

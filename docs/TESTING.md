@@ -38,7 +38,14 @@ a full suite into a successful skip.
   them. Tests never change the shared roles' attributes (the hardening test
   uses private role names), and a test that logs in as `ledger_app` /
   `ledger_ro` sets only `postgrestest.SharedRolePassword`, so concurrent
-  processes cannot invalidate each other's credentials. `make db`
+  processes cannot invalidate each other's credentials. It does so through
+  `postgrestest.SetSharedRolePassword`, under a transaction-scoped advisory
+  lock on the server's `postgres` database: two simultaneous `ALTER ROLE`s of
+  one role otherwise fail one side with `tuple concurrently updated`.
+- **Role graph.** Tests that create throwaway migration-credential roles and
+  assert the cluster-wide `ledger_owner` membership graph is unchanged hold
+  `pgtestenv.RoleGraphTestLockKey` exclusively for their duration, so another
+  process's runner role cannot appear in (or vanish from) their snapshot. `make db`
   (`scripts/dev-db.sh`, the local development database `ledger` on the same
   server) sets that same password on the three roles, so it and a running
   suite never break each other's logins. Until `ledger` is migrated nothing
@@ -98,17 +105,19 @@ make test-consumer
 ```
 
 The R2 tests run against an in-process fake S3 server (`internal/s3test`,
-gofakes3) -- no container, nothing to start. The one R2 assertion the fake
-cannot serve, Object Lock refusing to delete a retained version, is behind
-`-tags s3worm` and run by `make test-r2-worm` against a real S3-compatible
-server: `LEDGER_TEST_S3_ENDPOINT`, `LEDGER_TEST_S3_ACCESS_KEY_ID` and
+gofakes3) -- no container, nothing to start. `make test-r2-s3server`
+(`-tags s3server`) runs the same tests against a real S3-compatible server
+that implements versioning and Object Lock (MinIO does), plus the one test
+the fake cannot serve: Object Lock refusing to delete a retained version. The
+server is `LEDGER_TEST_S3_ENDPOINT`, `LEDGER_TEST_S3_ACCESS_KEY_ID` and
 `LEDGER_TEST_S3_SECRET_ACCESS_KEY`, by default a native MinIO on this machine
 (`http://127.0.0.1:9000`, `minioadmin` / `minioadmin`; CI starts one in a
-container). An unreachable server fails that target. It reuses one bucket,
-`ledger-test-worm`, with a random key prefix per run: the objects carry a
-one-day COMPLIANCE retention, so neither they nor a bucket holding them can be
-deleted before it expires -- a bucket per run would leave one behind every
-time. EVM end-to-end tests need
+container). An unreachable server fails that target. Each ordinary test gets
+its own `ledger-test-<random>` bucket, emptied and deleted afterwards. The
+Object Lock test reuses one bucket, `ledger-test-worm`, with a random key
+prefix per run: its objects carry a one-day COMPLIANCE retention, so neither
+they nor a bucket holding them can be deleted before it expires -- a bucket
+per run would leave one behind every time. EVM end-to-end tests need
 Foundry's `anvil`; `make test-e2e` opts into their build tag. The Linux CI workflow
 also runs three bounded 30-second fuzz jobs. Local unit or package checks do not
 stand in for those jobs.

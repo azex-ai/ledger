@@ -36,6 +36,35 @@ var databaseCounter atomic.Int64
 // Test-only; never a real secret.
 const SharedRolePassword = "ledger-test-shared-role-password-not-a-real-secret" //nolint:gosec // test-only credential
 
+// SetSharedRolePassword sets SharedRolePassword on the shared role (ledger_app
+// or ledger_ro) of the server pool points at. Every test process on the
+// server does this to the same pg_authid row, and two ALTER ROLE statements
+// on one row at the same moment make the loser fail with "tuple concurrently
+// updated" (XX000). So the ALTER runs on the server's `postgres` database, in
+// a transaction holding pgtestenv.SharedRolePasswordLockKey there (advisory
+// locks are per database; the per-test databases would not exclude each
+// other). scripts/dev-db.sh takes the same lock for the same reason.
+func SetSharedRolePassword(ctx context.Context, pool *pgxpool.Pool, role string) error {
+	maint, err := pgtestenv.MaintenanceURL(pool.Config().ConnString())
+	if err != nil {
+		return err
+	}
+	conn, err := pgx.Connect(ctx, maint)
+	if err != nil {
+		return fmt.Errorf("postgrestest: connect to set %s password: %w", role, err)
+	}
+	defer func() { _ = conn.Close(context.WithoutCancel(ctx)) }()
+	return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", pgtestenv.SharedRolePasswordLockKey); err != nil {
+			return fmt.Errorf("postgrestest: lock for %s password: %w", role, err)
+		}
+		if _, err := tx.Exec(ctx, "ALTER ROLE "+pgx.Identifier{role}.Sanitize()+" WITH PASSWORD '"+SharedRolePassword+"'"); err != nil {
+			return fmt.Errorf("postgrestest: set %s password: %w", role, err)
+		}
+		return nil
+	})
+}
+
 func baseConnection(t testing.TB) string {
 	t.Helper()
 	if testing.Short() {
@@ -54,6 +83,15 @@ func baseConnection(t testing.TB) string {
 		// must outlive every test in this process, and the server releases it
 		// when the process exits. See pgtestenv.RunLockKey.
 		runLock.conn, runLock.err = pgtestenv.HoldRunLock(ctx, base)
+		if runLock.err != nil {
+			return
+		}
+		// Held on the same never-closed connection, so it is released exactly
+		// when this process exits: while it is held, this process's template
+		// is not an orphan (pgtestenv.ReclaimOrphanTemplates).
+		lockCtx, lockCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer lockCancel()
+		runLock.err = pgtestenv.HoldProcessLock(lockCtx, runLock.conn, os.Getpid())
 	})
 	require.NoErrorf(t, runLock.err,
 		"cannot reach the test PostgreSQL server (or take its test-run lock), so this integration test cannot run. "+
@@ -147,7 +185,9 @@ func databaseURL(t testing.TB, base, name string) string {
 // process: no single test owns it, so no t.Cleanup can drop it. Its name,
 // ledger_test_<pid>_0, is in the cleanup's namespace (n = 0 is never issued
 // by nextDatabaseName), so `make test` / `make test-clean-db` removes it
-// once no ledger test process is running.
+// once no ledger test process is running, and the next test process to
+// create its own template drops it once this process has exited
+// (pgtestenv.ReclaimOrphanTemplates).
 var migrated struct {
 	once sync.Once
 	name string
@@ -159,21 +199,30 @@ func migratedTemplate(t testing.TB, base string) string {
 	migrated.once.Do(func() {
 		migrated.name, migrated.err = createMigratedTemplate(base)
 	})
-	require.NoError(t, migrated.err, "create this test process's migrated template database")
+	require.NoError(t, migrated.err, "create this test process's migrated template database (the first SetupDB "+
+		"in this process failed to; every later SetupDB in the process reports that same, cached error)")
 	return migrated.name
 }
 
 func createMigratedTemplate(base string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	name := pgtestenv.DatabaseName(os.Getpid(), 0)
+	pid := os.Getpid()
+	name := pgtestenv.TemplateDatabaseName(pid)
+	// Templates of exited processes (a direct `go test` leaves one per package
+	// binary) are reclaimed here, by the next process to start, since the
+	// run-lock-gated cleanup rarely gets a quiet server.
+	if err := pgtestenv.ReclaimOrphanTemplates(ctx, base, pid); err != nil {
+		return "", fmt.Errorf("postgrestest: template: %w", err)
+	}
 	admin, err := pgxpool.New(ctx, base)
 	if err != nil {
 		return "", fmt.Errorf("postgrestest: template: connect: %w", err)
 	}
 	defer admin.Close()
-	// A database with this name can only be a leftover of a dead process
-	// that had this pid: a live one would be this process.
+	// This process holds (ProcessLockNamespace, pid) exclusively (taken in
+	// baseConnection before any SetupDB gets here), so a database with this
+	// name can only be a leftover of an exited process that had this pid.
 	if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 		return "", fmt.Errorf("postgrestest: template: drop leftover %s: %w", name, err)
 	}

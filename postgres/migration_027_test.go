@@ -2,7 +2,6 @@ package postgres_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -183,7 +182,7 @@ func TestMigration027_UnlinkEventJournalIsRefusedForLedgerApp(t *testing.T) {
 	f := setupEventWedge(t, ctx, pool, svc, "B")
 
 	const appPassword = postgrestest.SharedRolePassword
-	_, err = pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	err = postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 	app, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", appPassword))
 	require.NoError(t, err)

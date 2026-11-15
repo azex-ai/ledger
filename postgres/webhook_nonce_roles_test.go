@@ -36,7 +36,7 @@ func TestWebhookNonce_WorksAsLedgerApp(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 
 	const appPassword = postgrestest.SharedRolePassword
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 
 	appPool, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", appPassword))
@@ -86,7 +86,7 @@ func TestWebhookNonce_SurvivesRevokedPrunePrivilege(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 
 	const appPassword = postgrestest.SharedRolePassword
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, "REVOKE DELETE ON public.webhook_nonces FROM ledger_app")
 	require.NoError(t, err)
@@ -140,7 +140,7 @@ func TestWebhookNonce_PruneDegradationLeavesATrace(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 
 	const appPassword = postgrestest.SharedRolePassword
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 
 	// Reproduce a database that never got migration 002's grant. Cluster-wide

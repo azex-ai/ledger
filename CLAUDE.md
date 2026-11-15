@@ -56,7 +56,7 @@ make sqlc       # cd postgres && sqlc generate
 make sqlc-diff  # cd postgres && sqlc diff   (CI gate: generated code must match queries)
 make db         # bash scripts/dev-db.sh: idempotent `ledger` database + ledger_owner/app/ro roles on the shared local PostgreSQL 127.0.0.1:5432, no Docker (local dev database only)
 make db-docker  # docker compose up -d postgres   (explicit container alternative; not a default path)
-make test-r2-worm # anchors/r2 Object Lock test (-tags s3worm) against a real S3 server: LEDGER_TEST_S3_* or native MinIO 127.0.0.1:9000
+make test-r2-s3server # anchors/r2 tests + Object Lock test (-tags s3server) against a real S3 server with versioning/Object Lock: LEDGER_TEST_S3_* or native MinIO 127.0.0.1:9000
 make openapi-check # cd web && npm run -w @azex/ledger-react codegen:check (docs/openapi.yaml vs. web/packages/ledger-react's generated schema.ts; needs `npm ci` in web/ once)
 
 # Unit tests only (no DB needed)
@@ -106,7 +106,7 @@ go test ./postgres/ -run TestName -race -count=1
 - Integration tests use real PostgreSQL on ONE server — `DATABASE_URL`, else the shared local `postgres://dev:dev@127.0.0.1:5432/postgres` — no mocked DB, no Docker/testcontainers, no second cluster. Each test gets its own `ledger_test_<pid>_<n>` database, copied from a per-process migrated template `ledger_test_<pid>_0` (migrations run once per process, not once per test); the destructive full-migration roundtrip rewrites the three role names to private ones in-test (`postgrestest.NewRoleRewritingMigrationSource`) so it never drops the shared `ledger_*` roles. See `docs/TESTING.md`.
 - Test files: `postgres/*_test.go` for store tests, `service/*_test.go` for service tests.
 - Unit tests: `core/*_test.go`, `presets/*_test.go`, `channel/onchain/*_test.go`.
-- CI runs (`.github/workflows/go-verify.yml`, shared by `ci.yml` and `go-release.yml`): `go vet`, `golangci-lint`, `go test -race -timeout 15m -count=1` (root + `chains/evm` + `anchors/r2`), the three `core` fuzz targets for 30s each, `chains/evm`'s e2e tests, `govulncheck`, `sqlc diff`, `go build`.
+- CI runs (`.github/workflows/go-verify.yml`, shared by `ci.yml` and `go-release.yml`): `go vet`, `golangci-lint`, `go test -race -timeout 15m -count=1` (root + `chains/evm` + `anchors/r2`), `anchors/r2` again with `-tags s3server` against a digest-pinned MinIO container, the three `core` fuzz targets for 30s each, `chains/evm`'s e2e tests, `govulncheck`, `sqlc diff`, `go build`.
 
 ## File Layout Quick Reference
 
@@ -203,7 +203,7 @@ POST   /api/v1/holder-tokens, GET|POST /api/v1/holder/*   — holder-token walle
 
 ## Gotchas
 
-- `go.work` spans four modules: root `.`, `chains/evm`, `anchors/r2`, and `anchors/r2/internal/s3test`. The PostgreSQL fixture is the root's `internal/postgrestest` package, imported only by tests. Keeping it in the root removes the unpublishable zero pseudo-version that broke `go mod tidy` for external consumers. Test-only dependencies (the fake S3 server `gofakes3` in `anchors/r2/internal/s3test`) appear in test/module metadata but do not enter a production `go list -deps`; verify consumers with `make test-consumer`. R2 and its fake-S3 fixture still have separate module/release constraints (README). The r2 Object Lock assertion needs a real S3 server and lives behind `-tags s3worm` (`make test-r2-worm`).
+- `go.work` spans four modules: root `.`, `chains/evm`, `anchors/r2`, and `anchors/r2/internal/s3test`. The PostgreSQL fixture is the root's `internal/postgrestest` package, imported only by tests. Keeping it in the root removes the unpublishable zero pseudo-version that broke `go mod tidy` for external consumers. Test-only dependencies (the fake S3 server `gofakes3` in `anchors/r2/internal/s3test`) appear in test/module metadata but do not enter a production `go list -deps`; verify consumers with `make test-consumer`. R2 and its fake-S3 fixture still have separate module/release constraints (README). The r2 Object Lock assertion needs a real S3 server and lives behind `-tags s3server` (`make test-r2-s3server`).
 - `postgres/sqlcgen/` is generated — never edit manually, always `sqlc generate`.
 - sqlc config is at `postgres/sqlc.yaml`, run sqlc from `postgres/` dir.
 - Migrations use `golang-migrate/migrate/v4` with embedded FS.

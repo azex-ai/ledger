@@ -1438,8 +1438,8 @@ that explicitly imports `anchors/r2` compiles against it.
 
 It speaks the plain S3 API (`github.com/aws/aws-sdk-go-v2/service/s3`), so
 it is exercised in this repo's own test suite against an in-process fake
-S3 server (gofakes3) rather than real R2, and its Object Lock assertion
-(`-tags s3worm`, `make test-r2-worm`) against a real MinIO — the carrier's
+S3 server (gofakes3) rather than real R2, and again, with its Object Lock
+assertion, against a real MinIO (`-tags s3server`, `make test-r2-s3server`) — the carrier's
 actual reachability, credentials, and Object Lock configuration on the real
 bucket are verified by the deployer, per point 1 of the four carrier
 properties above (not something a black-box Go test run in CI can prove).

@@ -84,6 +84,7 @@ func TestMigrate_InstallsUnderNonSuperuserBootstrapCredential(t *testing.T) {
 	// Unique per run, because role names are cluster-wide while databases are
 	// not: a deterministic name collides with a leftover from an interrupted
 	// run, and with a concurrent copy of this test on a shared server.
+	holdRoleGraphTestLock(t)
 	bootstrap := fmt.Sprintf("ledger_bootstrap_%d", time.Now().UnixNano())
 	const bootstrapPassword = "bootstrap-role-test-not-a-real-secret" //nolint:gosec // test-only credential
 

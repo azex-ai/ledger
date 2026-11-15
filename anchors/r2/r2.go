@@ -101,7 +101,7 @@ import (
 type Config struct {
 	// Endpoint is the full S3-compatible endpoint URL, e.g.
 	// "https://<account-id>.r2.cloudflarestorage.com" for Cloudflare R2, or
-	// a local MinIO container's address in tests. The caller derives this
+	// an S3-compatible test server's address in tests. The caller derives this
 	// (from a Cloudflare account ID, or wherever else) -- this package only
 	// consumes the final URL.
 	Endpoint string

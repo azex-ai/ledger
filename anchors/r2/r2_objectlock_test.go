@@ -1,14 +1,11 @@
-//go:build s3worm
+//go:build s3server
 
 package r2_test
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,24 +15,11 @@ import (
 	"github.com/azex-ai/ledger/anchors/r2"
 )
 
-// This file needs a REAL S3-compatible server with Object Lock support
-// (MinIO, or R2 itself): the guarantee it asserts belongs to the server, and
-// the in-process fake the rest of this package's tests use (internal/s3test)
-// does not implement Object Lock. It is behind the `s3worm` build tag and run
-// by `make test-r2-worm` (docs/TESTING.md). It is never skipped for a missing
-// server: built with the tag, an unreachable server fails it.
-//
-// The server is read from the environment, defaulting to a MinIO on this
-// machine with MinIO's stock root credential:
-//
-//	LEDGER_TEST_S3_ENDPOINT           http://127.0.0.1:9000
-//	LEDGER_TEST_S3_ACCESS_KEY_ID      minioadmin
-//	LEDGER_TEST_S3_SECRET_ACCESS_KEY  minioadmin
+// This test needs a real S3-compatible server with versioning and Object
+// Lock (MinIO does): the guarantee it asserts belongs to the server, and the
+// in-process fake does not implement Object Lock. It exists only under
+// `-tags s3server`; s3Server (fixture_server_test.go) says which server.
 const (
-	defaultWORMEndpoint  = "http://127.0.0.1:9000"
-	defaultWORMAccessKey = "minioadmin"
-	defaultWORMSecretKey = "minioadmin" //nolint:gosec // MinIO's stock local root credential, test-only
-
 	// wormBucket is ONE bucket reused by every run, not a bucket per run:
 	// its objects carry a COMPLIANCE retention, so neither they nor the
 	// bucket can be deleted until the retention expires -- a per-run bucket
@@ -43,22 +27,6 @@ const (
 	// isolated by key prefix (wormPrefix) instead.
 	wormBucket = "ledger-test-worm"
 )
-
-func wormServer(t *testing.T) (endpoint, accessKey, secret string) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("short mode: skipping the real-server Object Lock test")
-	}
-	get := func(name, fallback string) string {
-		if v := os.Getenv(name); v != "" {
-			return v
-		}
-		return fallback
-	}
-	return get("LEDGER_TEST_S3_ENDPOINT", defaultWORMEndpoint),
-		get("LEDGER_TEST_S3_ACCESS_KEY_ID", defaultWORMAccessKey),
-		get("LEDGER_TEST_S3_SECRET_ACCESS_KEY", defaultWORMSecretKey)
-}
 
 // ensureLockedBucket makes wormBucket exist with Object Lock enabled AND a
 // default retention period -- the same bucket-level configuration
@@ -82,7 +50,7 @@ func ensureLockedBucket(t *testing.T, client *s3.Client) {
 	})
 	var owned *types.BucketAlreadyOwnedByYou
 	if err != nil && !errors.As(err, &owned) {
-		t.Fatalf("create locked bucket %s on the S3 server (is it running? see docs/TESTING.md, `make test-r2-worm`): %v",
+		t.Fatalf("create locked bucket %s on the S3 server (is it running? see docs/TESTING.md, `make test-r2-s3server`): %v",
 			wormBucket, err)
 	}
 	_, err = client.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
@@ -106,11 +74,7 @@ func ensureLockedBucket(t *testing.T, client *s3.Client) {
 // wormPrefix is this run's own key prefix inside wormBucket.
 func wormPrefix(t *testing.T) string {
 	t.Helper()
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("random prefix: %v", err)
-	}
-	return "anchor/worm-" + hex.EncodeToString(b[:])
+	return "anchor/worm-" + randomSuffix(t)
 }
 
 // TestAnchor_ObjectLockRefusesDeletingAPublishedVersion is the WORM
@@ -126,7 +90,7 @@ func wormPrefix(t *testing.T) string {
 // every anchor observation (migration 018) instead of trusting the carrier
 // to be un-erasable.
 func TestAnchor_ObjectLockRefusesDeletingAPublishedVersion(t *testing.T) {
-	endpoint, accessKey, secret := wormServer(t)
+	endpoint, accessKey, secret := s3Server(t)
 	raw := newRawClient(endpoint, accessKey, secret)
 	ensureLockedBucket(t, raw)
 	prefix := wormPrefix(t)

@@ -2,7 +2,6 @@ package postgres_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -23,7 +22,7 @@ import (
 func ledgerAppPool(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
 	password := postgrestest.SharedRolePassword
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", password))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 	appPool, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", password))
 	require.NoError(t, err)
