@@ -45,7 +45,8 @@ Prefer the `Makefile` targets — they encode the canonical flags:
 
 ```bash
 make build      # go build ./...
-make test       # go test -race -timeout 15m -count=1 ./...   (needs PostgreSQL — testcontainers, no mocks; refuses to run when Docker is unreachable and DATABASE_URL is unset)
+make test       # go test -race -timeout 15m -count=1 ./... + pgtestclean   (real PostgreSQL, no mocks, no Docker: DATABASE_URL or the shared local postgres://dev:dev@127.0.0.1:5432; an unreachable server fails the run)
+make test-clean-db # drop leftover ledger test databases/roles on the test server (docs/TESTING.md)
 make test-short # go test -short -race -count=1 ./...
 make test-submodules # chains/evm + anchors/r2 (separate modules — `./...` never reaches them)
 make test-e2e   # chains/evm's `//go:build e2e` tests (needs anvil on PATH)
@@ -100,7 +101,7 @@ go test ./postgres/ -run TestName -race -count=1
 
 ## Testing
 
-- Integration tests use `testcontainers-go` with real PostgreSQL — no mocked DB.
+- Integration tests use real PostgreSQL on ONE server — `DATABASE_URL`, else the shared local `postgres://dev:dev@127.0.0.1:5432/postgres` — no mocked DB, no Docker/testcontainers, no second cluster. Each test gets its own `ledger_test_<pid>_<n>` database; the destructive full-migration roundtrip rewrites the three role names to private ones in-test (`postgrestest.NewRoleRewritingMigrationSource`) so it never drops the shared `ledger_*` roles. See `docs/TESTING.md`.
 - Test files: `postgres/*_test.go` for store tests, `service/*_test.go` for service tests.
 - Unit tests: `core/*_test.go`, `presets/*_test.go`, `channel/onchain/*_test.go`.
 - CI runs (`.github/workflows/go-verify.yml`, shared by `ci.yml` and `go-release.yml`): `go vet`, `golangci-lint`, `go test -race -timeout 15m -count=1` (root + `chains/evm` + `anchors/r2`), the three `core` fuzz targets for 30s each, `chains/evm`'s e2e tests, `govulncheck`, `sqlc diff`, `go build`.

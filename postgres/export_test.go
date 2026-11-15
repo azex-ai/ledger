@@ -20,6 +20,11 @@ import (
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
+// ClusterMigrationLockKeyForTest is clusterMigrationLockKey, exported so the
+// copy in internal/pgtestenv (end-of-run test cleanup takes the same lock) is
+// pinned to it.
+const ClusterMigrationLockKeyForTest = clusterMigrationLockKey
+
 // BalancePair is balancePair, exported for tests only.
 type BalancePair = balancePair
 
