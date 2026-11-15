@@ -21,6 +21,17 @@ a full suite into a successful skip.
   `ledger_test_<pid>_<n>` and drops it in `t.Cleanup`. The pid keeps names
   unique across the package binaries of one `go test ./...` and across
   concurrent runs from different worktrees on the same server.
+- **Migrated template.** Migrations run once per test process, not per
+  test: the first `postgrestest.SetupDB` migrates `ledger_test_<pid>_0` with
+  `postgres.Migrate`, and every `SetupDB` copies it (`CREATE DATABASE ...
+  TEMPLATE`), then re-applies the state migrations set on the database object
+  itself, which a copy does not inherit (migration 030's `REVOKE TEMPORARY`;
+  pinned by `TestTemplateCopyMatchesTheTemplate`). Per-test `Migrate` made
+  every test queue on the cluster-wide migration lock behind every other test
+  process on the server. The template lives as long as its process; the
+  cleanup below removes it, so a direct `go test` leaves one per package
+  binary until `make test-clean-db`. `SetupRawDB` still hands out an empty,
+  unmigrated database.
 - **Shared roles.** The production migrations create the cluster-wide roles
   `ledger_owner` / `ledger_app` / `ledger_ro` idempotently, exactly as a
   second ledger database on a production cluster would. Ordinary tests share

@@ -8,6 +8,7 @@ package postgrestest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -90,6 +91,13 @@ func nextDatabaseName() string {
 
 func createNamedDatabase(t testing.TB, base, name string) string {
 	t.Helper()
+	return createDatabaseFrom(t, base, name, "")
+}
+
+// createDatabaseFrom creates database name -- a copy of template when
+// template is non-empty -- and drops it when t finishes.
+func createDatabaseFrom(t testing.TB, base, name, template string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin, err := pgxpool.New(ctx, base)
@@ -99,13 +107,14 @@ func createNamedDatabase(t testing.TB, base, name string) string {
 		"cannot reach the test PostgreSQL server, so this integration test cannot run. This is a failure, not a skip: "+
 			"start the shared local instance (docs/TESTING.md), point DATABASE_URL at a test server, or run "+
 			"`make test-short` to skip every integration test explicitly")
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+	stmt := "CREATE DATABASE " + pgx.Identifier{name}.Sanitize()
+	if template != "" {
+		stmt += " TEMPLATE " + pgx.Identifier{template}.Sanitize()
+	}
+	_, err = admin.Exec(ctx, stmt)
 	require.NoError(t, err)
 
-	u, err := url.Parse(base)
-	require.NoError(t, err)
-	u.Path = "/" + name
-	connStr := u.String()
+	connStr := databaseURL(t, base, name)
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -119,7 +128,83 @@ func createNamedDatabase(t testing.TB, base, name string) string {
 			t.Errorf("drop test database %s: %v", name, err)
 		}
 	})
+	if template != "" {
+		require.NoError(t, applyDatabaseLevelMigrationState(ctx, admin, name))
+	}
 	return connStr
+}
+
+func databaseURL(t testing.TB, base, name string) string {
+	t.Helper()
+	u, err := url.Parse(base)
+	require.NoError(t, err)
+	u.Path = "/" + name
+	return u.String()
+}
+
+// migrated is this process's migrated template database, created by the
+// first SetupDB and reused by every later one. It lives as long as the
+// process: no single test owns it, so no t.Cleanup can drop it. Its name,
+// ledger_test_<pid>_0, is in the cleanup's namespace (n = 0 is never issued
+// by nextDatabaseName), so `make test` / `make test-clean-db` removes it
+// once no ledger test process is running.
+var migrated struct {
+	once sync.Once
+	name string
+	err  error
+}
+
+func migratedTemplate(t testing.TB, base string) string {
+	t.Helper()
+	migrated.once.Do(func() {
+		migrated.name, migrated.err = createMigratedTemplate(base)
+	})
+	require.NoError(t, migrated.err, "create this test process's migrated template database")
+	return migrated.name
+}
+
+func createMigratedTemplate(base string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	name := pgtestenv.DatabaseName(os.Getpid(), 0)
+	admin, err := pgxpool.New(ctx, base)
+	if err != nil {
+		return "", fmt.Errorf("postgrestest: template: connect: %w", err)
+	}
+	defer admin.Close()
+	// A database with this name can only be a leftover of a dead process
+	// that had this pid: a live one would be this process.
+	if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
+		return "", fmt.Errorf("postgrestest: template: drop leftover %s: %w", name, err)
+	}
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+		return "", fmt.Errorf("postgrestest: template: create %s: %w", name, err)
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", errors.New("postgrestest: template: parse database url: malformed")
+	}
+	u.Path = "/" + name
+	// Migrate expects a pgx5:// URL for the pgx/v5 driver.
+	if err := ledgerpg.Migrate(strings.Replace(u.String(), "postgres://", "pgx5://", 1)); err != nil {
+		return "", fmt.Errorf("postgrestest: template: migrate %s: %w", name, err)
+	}
+	return name, nil
+}
+
+// applyDatabaseLevelMigrationState re-applies, on a copy of the template,
+// what the migrations set on the DATABASE object itself. CREATE DATABASE
+// ... TEMPLATE copies everything inside the database but not the database's
+// own ACL (pg_database.datacl) or its ALTER DATABASE settings, so without
+// this a copy would silently lack migration 030's REVOKE TEMPORARY ... FROM
+// PUBLIC. TestTemplateCopyMatchesTheTemplate pins that a copy ends up with
+// the template's ACL and settings, so a future migration adding
+// database-level state fails there instead of passing on a weaker copy.
+func applyDatabaseLevelMigrationState(ctx context.Context, admin *pgxpool.Pool, name string) error {
+	if _, err := admin.Exec(ctx, "REVOKE TEMPORARY ON DATABASE "+pgx.Identifier{name}.Sanitize()+" FROM PUBLIC"); err != nil {
+		return fmt.Errorf("postgrestest: revoke TEMPORARY on %s: %w", name, err)
+	}
+	return nil
 }
 
 // SetupRawDB creates an isolated PostgreSQL database WITHOUT running migrations
@@ -131,19 +216,24 @@ func SetupRawDB(t testing.TB) string {
 	return isolatedConnection(t)
 }
 
-// SetupDB creates a fresh database on the test server, runs ledger migrations,
-// and returns a *pgxpool.Pool. An unreachable server fails the test. Only
+// SetupDB creates a fresh, fully migrated database on the test server and
+// returns a *pgxpool.Pool. An unreachable server fails the test. Only
 // explicit -short skips integration tests.
+//
+// The database is a copy of this process's migrated template (see
+// migrated): ledger migrations run once per test process, through
+// the same postgres.Migrate a host calls, and every SetupDB after that is a
+// CREATE DATABASE ... TEMPLATE. Running Migrate per test made every test
+// queue on the cluster-wide migration lock (postgres.clusterMigrationLockKey)
+// behind every other test process on the server.
 //
 // Accepts testing.TB so it can be reused from benchmarks as well as tests.
 func SetupDB(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
-	connStr := isolatedConnection(t)
-
-	// Migrate expects a pgx5:// URL for the pgx/v5 driver.
-	migrateURL := strings.Replace(connStr, "postgres://", "pgx5://", 1)
-	require.NoError(t, ledgerpg.Migrate(migrateURL))
+	base := baseConnection(t)
+	template := migratedTemplate(t, base)
+	connStr := createDatabaseFrom(t, base, nextDatabaseName(), template)
 
 	pool, err := pgxpool.New(ctx, connStr)
 	require.NoError(t, err)
