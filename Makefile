@@ -24,10 +24,11 @@ test-consumer:
 # unreachable server FAILS the run (F-9, 2026-09-03 independent review: a
 # suite that did not execute is not a suite that passed); `make test-short` is
 # the explicit way to run without one.
-# pgtestclean runs afterwards, whatever go test returned: it removes ledger
-# test databases/roles of processes that are no longer running and drops the
-# shared ledger_owner/ledger_app/ledger_ro roles once nothing on the server
-# depends on them (it leaves them to a concurrent run that still uses them).
+# pgtestclean runs afterwards, whatever go test returned. Unless another
+# ledger test process still holds the run lock (then that run cleans up), it
+# drops leftover ledger test databases/roles and the shared
+# ledger_owner/ledger_app/ledger_ro roles once nothing on the server depends
+# on them.
 # The recipe exits with go test's status, or pgtestclean's if go test passed.
 test:
 	status=0; go test -race -timeout 15m -count=1 ./... || status=$$?; \

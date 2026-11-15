@@ -21,9 +21,11 @@ import (
 // not touch ledger_ prefixed functions, tables or other identifiers.
 var defaultRoleToken = regexp.MustCompile(`\bledger_(owner|app|ro)\b`)
 
-// rolePrefixShape is what RewriteRoleNames accepts as a prefix: a plain,
-// unquoted-safe lower-case identifier stem.
-var rolePrefixShape = regexp.MustCompile(`^[a-z][a-z0-9_]{0,50}$`)
+// rolePrefixShape is what NewRoleRewritingMigrationSource accepts as a
+// prefix: a plain lower-case identifier stem in the suite's own test
+// namespace. In particular "ledger" -- the identity rewrite, which would
+// target the shared roles -- is rejected.
+var rolePrefixShape = regexp.MustCompile(`^ledger_test_[a-z0-9_]{1,40}$`)
 
 // RoleNames are the three role names a migration run is written against.
 type RoleNames struct {

@@ -110,8 +110,8 @@ replace github.com/azex-ai/ledger => ../ledger
 
 Run `go mod tidy` and build in the consuming module, without `go.work` if desired.
 The PostgreSQL test fixture is an internal package of the root module, not a
-separately versioned dependency. Its testcontainers dependencies can appear in
-module metadata/checksums, but do not enter a production import of `ledger`.
+separately versioned dependency; it needs no container runtime and does not
+enter a production import of `ledger`.
 The optional EVM/R2 modules keep their own dependency boundaries.
 
 Run `make test-consumer` to check the checkout from three independent host

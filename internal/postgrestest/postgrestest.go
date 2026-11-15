@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +27,14 @@ import (
 
 var databaseCounter atomic.Int64
 
+// SharedRolePassword is the one password tests may set on the shared roles
+// ledger_app / ledger_ro (ALTER ROLE ... PASSWORD) to log in as them. Roles
+// are cluster-wide and every test process on the server shares them, so a
+// per-test password would let one process invalidate another's credential
+// mid-run; with a single value, concurrent ALTERs are interchangeable.
+// Test-only; never a real secret.
+const SharedRolePassword = "ledger-test-shared-role-password-not-a-real-secret" //nolint:gosec // test-only credential
+
 func baseConnection(t testing.TB) string {
 	t.Helper()
 	if testing.Short() {
@@ -36,7 +45,29 @@ func baseConnection(t testing.TB) string {
 	// that passed. The only explicit way to run without a database is -short
 	// (above). Reachability is checked by createNamedDatabase's Ping, which
 	// fails the test through require.NoErrorf.
-	return pgtestenv.BaseURL()
+	base := pgtestenv.BaseURL()
+	runLock.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		// The connection is deliberately never closed: the shared run lock
+		// must outlive every test in this process, and the server releases it
+		// when the process exits. See pgtestenv.RunLockKey.
+		runLock.conn, runLock.err = pgtestenv.HoldRunLock(ctx, base)
+	})
+	require.NoErrorf(t, runLock.err,
+		"cannot reach the test PostgreSQL server (or take its test-run lock), so this integration test cannot run. "+
+			"This is a failure, not a skip: start the shared local instance (docs/TESTING.md), point DATABASE_URL at a "+
+			"test server, or run `make test-short` to skip every integration test explicitly")
+	return base
+}
+
+// runLock is this process's shared hold on pgtestenv.RunLockKey, taken before
+// its first database is created; while any test process holds it,
+// pgtestclean removes nothing.
+var runLock struct {
+	once sync.Once
+	conn *pgx.Conn
+	err  error
 }
 
 func isolatedConnection(t testing.TB) string {

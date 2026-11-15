@@ -176,7 +176,7 @@ func TestGuardFunctionSearchPath_ExemptionsCannotReadRelations(t *testing.T) {
 func TestLedgerApp_CannotCreateTemporaryRelations(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "searchpath-temp-revoked-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	_, err := appPool.Exec(ctx, `CREATE TEMP TABLE w5_probe (x int)`)
 	require.Error(t, err, "ledger_app must not be able to create a temporary relation at all -- that is what C1 and C2 both needed")
@@ -228,7 +228,7 @@ func TestBalanceGuard_SurvivesPgTempRelationShadowing(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 	store, deps := setupInvariantsFixture(t, pool, ctx)
-	appPool := newAppPool(t, pool, "searchpath-c1-shadow-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	journalID := postBalancedJournal(t, store, pool, ctx, deps, 5101, decimal.NewFromInt(100), "c1-shadow")
 	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
@@ -278,7 +278,7 @@ func TestBalanceGuard_DedupSetCannotBePreSeeded(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 	_, deps := setupInvariantsFixture(t, pool, ctx)
-	appPool := newAppPool(t, pool, "searchpath-c2-preseed-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
 	classID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)

@@ -100,7 +100,7 @@ func TestLedgerCreateMonthlyPartition_AcceptsMatchingNameAndRange(t *testing.T) 
 func TestLedgerRebalanceDefaultPartition_RejectsUnboundedRange(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "partition-rebalance-range-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	cases := []struct {
 		name        string

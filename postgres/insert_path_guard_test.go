@@ -41,7 +41,7 @@ import (
 func TestTemplateLineCannotBeAppendedAfterInstall(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-template-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	tmplStore := postgres.NewTemplateStore(pool)
 	ledgerStore := postgres.NewLedgerStore(pool)
@@ -131,7 +131,7 @@ func TestTemplateLineCannotBeAppendedAfterInstall(t *testing.T) {
 func TestConfigTableInsertsLeaveAForensicRow(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-audit-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	curUID := postgrestest.SeedCurrency(t, pool, "AUD2", "Audit Insert")
 	curID := postgrestest.InternalID(t, pool, "currencies", curUID)
@@ -177,7 +177,7 @@ func TestConfigTableInsertsLeaveAForensicRow(t *testing.T) {
 func TestDepositAddressRegistrationIsAudited(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-depaddr-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	_, err := appPool.Exec(ctx, `
 		INSERT INTO deposit_addresses (uid, account_holder, address, factory, init_hash)
@@ -209,7 +209,7 @@ func TestDepositAddressRegistrationIsAudited(t *testing.T) {
 func TestBookingIsBornAtTheStartOfItsLifecycle(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-booking-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	classStore := postgres.NewClassificationStore(pool)
 	bookingStore := postgres.NewBookingStore(pool)
@@ -303,7 +303,7 @@ func TestBookingIsBornAtTheStartOfItsLifecycle(t *testing.T) {
 func TestReservationIsBornActiveAndUnsettled(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-reservation-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	curUID := postgrestest.SeedCurrency(t, pool, "RSV", "Reservation Guard")
 	curID := postgrestest.InternalID(t, pool, "currencies", curUID)
@@ -357,7 +357,7 @@ func TestReservationIsBornActiveAndUnsettled(t *testing.T) {
 func TestChainCursorCannotJumpAndEveryMoveIsRecorded(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-cursor-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	cursors := postgres.NewChainCursorStore(pool)
 	const chainID = int64(911101)
@@ -457,7 +457,7 @@ func TestChainCursorCannotJumpAndEveryMoveIsRecorded(t *testing.T) {
 func TestAttestationInsertMustExtendTheChain(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-attest-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	t.Run("install-roles M4: a high seq cannot be appended", func(t *testing.T) {
 		_, err := appPool.Exec(ctx, `
@@ -539,7 +539,7 @@ func TestAttestationInsertMustExtendTheChain(t *testing.T) {
 func TestPoisonedAttestationTailHasAWayBack(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-discard-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	store := postgres.NewAttestationStore(pool)
 	_, err := store.InsertAttestation(ctx, core.Attestation{
@@ -628,7 +628,7 @@ func TestPoisonedAttestationTailHasAWayBack(t *testing.T) {
 func TestRebalanceDefaultPartitionIsBoundedByData(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "insert-guard-app-partition-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	curUID := postgrestest.SeedCurrency(t, pool, "PRT", "Partition Guard")
 	curID := postgrestest.InternalID(t, pool, "currencies", curUID)

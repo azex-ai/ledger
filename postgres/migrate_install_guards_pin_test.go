@@ -48,7 +48,7 @@ import (
 func TestMigrate_SecondLedgerDatabaseOnACluster(t *testing.T) {
 	ctx := context.Background()
 
-	// The first ledger database on this cluster, installed by the container's
+	// The first ledger database on this cluster, installed by the test server's
 	// superuser. This is what puts the three roles in the shared catalog --
 	// asserted rather than assumed, because everything below is about what
 	// happens when they are already there.

@@ -368,7 +368,7 @@ func TestConfirmPending_RecomputesUnderLock(t *testing.T) {
 // pending (user). Two INSERTs, both within what the application's own
 // credential holds (migration 008 gives it column-scoped INSERT on
 // journal_entries), and the standing threat model assumes that credential is
-// leaked. Running it as the container superuser would prove nothing.
+// leaked. Running it as the test superuser would prove nothing.
 func forgeUnsignedPendingCredit(t *testing.T, app *pgxpool.Pool, ctx context.Context, f pendingGateFixture, holder int64, key string, amount int64) int64 {
 	t.Helper()
 
@@ -421,7 +421,7 @@ func TestConfirmPending_RefusesForgedPendingEntries(t *testing.T) {
 	ctx := context.Background()
 	f := setupPendingGateFixture(t, pool, ctx, "USDT-PGFE")
 	const holder int64 = 9404
-	app := ledgerAppPool(t, ctx, pool, "w4-pending-gate-forged")
+	app := ledgerAppPool(t, ctx, pool)
 
 	// A genuine, signed deposit first, so the refusal below cannot be "the
 	// gate refuses everything" and so the forged journal is not the dimension's
@@ -492,7 +492,7 @@ func TestConfirmPending_VerifiedBaseCapsEntriesForgedInTheWindow(t *testing.T) {
 	ctx := context.Background()
 	f := setupPendingGateFixture(t, pool, ctx, "USDT-PGWD")
 	const holder int64 = 9405
-	app := ledgerAppPool(t, ctx, pool, "w4-pending-gate-window")
+	app := ledgerAppPool(t, ctx, pool)
 
 	_, err := f.writer.AddPending(ctx, core.AddPendingInput{
 		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(100),
@@ -674,7 +674,7 @@ func TestConfirmPending_WithoutAttestorIsEntriesOnly(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM classifications WHERE uid = $1`, pendingCls.UID).Scan(&f.pendingID))
 
 	const holder int64 = 9407
-	app := ledgerAppPool(t, ctx, pool, "w4-pending-gate-noattestor")
+	app := ledgerAppPool(t, ctx, pool)
 
 	// The honest path works, which is the whole reason the gate is off here:
 	// with no Attestor these journals are unsigned, so a V term would refuse

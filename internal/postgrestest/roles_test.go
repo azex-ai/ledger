@@ -89,7 +89,7 @@ func TestRoleRewritingSource_RenamesOnlyTheThreeRoles(t *testing.T) {
 }
 
 func TestNewRoleRewritingMigrationSource_RejectsUnsafePrefix(t *testing.T) {
-	for _, bad := range []string{"", "Ledger", "x; DROP ROLE dev", `x"y`, "1abc"} {
+	for _, bad := range []string{"", "ledger", "ledger_test_", "Ledger", "x; DROP ROLE dev", `ledger_test_x"y`, "app"} {
 		_, err := NewRoleRewritingMigrationSource(bad)
 		require.Errorf(t, err, "prefix %q", bad)
 	}

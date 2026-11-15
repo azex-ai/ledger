@@ -24,8 +24,10 @@ a full suite into a successful skip.
 - **Shared roles.** The production migrations create the cluster-wide roles
   `ledger_owner` / `ledger_app` / `ledger_ro` idempotently, exactly as a
   second ledger database on a production cluster would. Ordinary tests share
-  them. Tests that change a role attribute hold the cluster migration lock
-  (I-47) that every `Migrate` holds, and ACL-asserting tests hold it shared.
+  them. Tests never change the shared roles' attributes (the hardening test
+  uses private role names), and a test that logs in as `ledger_app` /
+  `ledger_ro` sets only `postgrestest.SharedRolePassword`, so concurrent
+  processes cannot invalidate each other's credentials.
 - **Destructive roundtrip.** `TestMigrations_FullDownChainAndReapply` runs
   Up → full Down → Up, and the baseline's down script drops its roles. It runs
   on the same server through `postgrestest.SetupRoleIsolatedRawDB` and
@@ -41,15 +43,21 @@ a full suite into a successful skip.
   are unchanged, that the private roles exist after each Up and are gone after
   the full Down, and that no roundtrip object is owned by or granted to a
   shared role.
-- **Cleanup.** `make test` runs `go run ./internal/pgtestenv/pgtestclean`
-  after `go test`, whatever its result. Holding the cluster migration lock
-  (skipping if another run holds it), it drops `ledger_test_<pid>_<n>`
-  databases and roles whose process is no longer running, and drops the shared
-  `ledger_owner` / `ledger_app` / `ledger_ro` only when nothing in any database
-  on the server depends on them — a concurrent run's live databases, or
-  another project that installed the ledger into its own database, keep them.
-  It touches no other names. `make test-clean-db` runs it alone, e.g. after a
-  direct `go test` or a killed run.
+- **Run lock and cleanup.** Every test process holds advisory lock
+  `pgtestenv.RunLockKey` in shared mode (on the server's `postgres` database)
+  from its first PostgreSQL test until it exits. `make test` then runs
+  `go run ./internal/pgtestenv/pgtestclean`, whatever `go test` returned. It
+  takes the cluster migration lock and the run lock exclusively, without
+  waiting, and does nothing if either is busy — some ledger test process (any
+  run, any worktree, any machine on that server) is still alive, and that
+  run's own cleanup finishes the job. Holding both, it drops leftover
+  `ledger_test_<pid>_<n>` databases, the suite's own test roles
+  (`ledger_test_<pid>_<n>_{owner,app,ro}`, `ledger_noadmin_<n>`,
+  `ledger_bootstrap_<n>`), and the shared `ledger_owner` / `ledger_app` /
+  `ledger_ro` only when nothing in any database on the server depends on them
+  (another project that installed the ledger into its own database keeps
+  them). It touches no other names. A direct `go test` does not clean up;
+  `make test-clean-db` runs the cleanup alone.
 
 To check the server afterwards:
 

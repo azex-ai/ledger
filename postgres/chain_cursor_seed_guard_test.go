@@ -32,7 +32,7 @@ import (
 func TestChainCursorFirstWriteIsBoundedToo(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "seed-guard-app-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	cursors := postgres.NewChainCursorStore(pool)
 

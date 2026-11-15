@@ -68,7 +68,7 @@ func setupHoldFixture(t *testing.T, pool *pgxpool.Pool, holder int64, keyID stri
 		reserver: postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, verifier)),
 		// ledgerAppPool is migration_024_test.go's helper -- the same
 		// credential, deliberately shared rather than duplicated.
-		attacker: ledgerAppPool(t, ctx, pool, "w3-holds-app-credential"),
+		attacker: ledgerAppPool(t, ctx, pool),
 		holder:   holder,
 	}
 }

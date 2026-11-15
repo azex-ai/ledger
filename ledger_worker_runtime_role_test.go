@@ -51,7 +51,7 @@ func TestServiceWorker_RuntimeRoleWarning_RealDatabase(t *testing.T) {
 	})
 
 	t.Run("ledger_app pool -> Worker's StartupReport carries no warning", func(t *testing.T) {
-		appPool := newRootAppPool(t, pool, "worker-runtime-role-not-a-real-secret") //nolint:gosec
+		appPool := newRootAppPool(t, pool) //nolint:gosec
 		svc, err := ledger.New(appPool)
 		require.NoError(t, err)
 
@@ -71,13 +71,14 @@ func TestServiceWorker_RuntimeRoleWarning_RealDatabase(t *testing.T) {
 // -- that helper lives in a _test.go file of a different package and is
 // invisible outside it, so this is the minimal reimplementation this
 // package's single ACL-boundary test needs. No cluster-lock guard (compare
-// postgres/roles_test.go's holdACLGuard): unlike the postgres package's own
-// role-attribute test suite, this is the only test in this package's binary
-// that touches role attributes, and every package gets its own dedicated
-// postgrestest container (a separate process per `go test` invocation), so
-// there is nothing else sharing this container to race with.
-func newRootAppPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool {
+// postgres/roles_test.go's holdACLGuard): no test elevates the shared
+// ledger_app's attributes any more (the hardening test uses private role
+// names), and the password it sets is postgrestest.SharedRolePassword -- the
+// one every test sets on the shared roles -- so concurrent processes on the
+// same server cannot invalidate each other's credentials.
+func newRootAppPool(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
+	password := postgrestest.SharedRolePassword
 	ctx := context.Background()
 
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", password))

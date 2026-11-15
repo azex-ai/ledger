@@ -51,7 +51,7 @@ package postgres_test
 // latest version, not dirty) are what notices if that stops being true.
 //
 // Nothing else in the suite can notice any of this: every other test installs
-// as the container's superuser, which takes the no-op branch of the elevation.
+// as the test server's superuser, which takes the no-op branch of the elevation.
 
 import (
 	"context"
@@ -145,7 +145,7 @@ func TestMigrate_InstallsUnderNonSuperuserBootstrapCredential(t *testing.T) {
 	// Which branch of that arrangement runs here depends on the cluster, and
 	// both are real: warm (this path) the credential can already SET ROLE, so
 	// Migrate touches no membership at all; cold -- `go test -run
-	// TestMigrate_Installs...` against a fresh container, where 001 creates the
+	// TestMigrate_Installs...` against a server with no ledger roles yet, where 001 creates the
 	// roles and its closing REVOKE takes the self-grant back out -- it holds
 	// admin option only and has to grant itself the SET membership. The
 	// residual assertion at the bottom holds in both.
@@ -162,7 +162,7 @@ func TestMigrate_InstallsUnderNonSuperuserBootstrapCredential(t *testing.T) {
 	// pg_has_role raises 42704 on a role that does not exist, and on a fresh
 	// server this test is the one that has to work when nothing has created
 	// these roles yet -- `go test -run TestMigrate_Installs...` on a cold
-	// container did exactly that, failing here for the one reason that is not
+	// server did exactly that, failing here for the one reason that is not
 	// a finding about Migrate. Absent means "does not inherit", which is the
 	// question being asked.
 	var inheritsBefore bool

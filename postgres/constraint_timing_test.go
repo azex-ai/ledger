@@ -185,7 +185,7 @@ func newBalanceAttackEnv(t *testing.T, password string) balanceAttackEnv {
 	return balanceAttackEnv{
 		ctx:        ctx,
 		pool:       pool,
-		appPool:    newAppPool(t, pool, password),
+		appPool:    newAppPool(t, pool),
 		store:      store,
 		deps:       deps,
 		currencyID: postgrestest.InternalID(t, pool, "currencies", deps.Currency),

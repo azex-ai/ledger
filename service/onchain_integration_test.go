@@ -610,8 +610,8 @@ func (m *recordingOnchainMetrics) tickCounts() (completed, failed map[string]int
 	return completed, failed
 }
 
-// setupOnchain wires a service.Onchain against a fresh testcontainers
-// Postgres instance, seeding one currency per code in currencyCodes.
+// setupOnchain wires a service.Onchain against a fresh per-test
+// Postgres database, seeding one currency per code in currencyCodes.
 func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, opts ...service.OnchainOption) *onchainHarness {
 	t.Helper()
 	pool := postgrestest.SetupDB(t)

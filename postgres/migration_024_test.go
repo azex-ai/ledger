@@ -20,8 +20,9 @@ import (
 // this repository's threat model assumes is leaked. Every assertion in this
 // file is about what that credential can do, so running them as the container
 // superuser (which every other test does) would prove nothing.
-func ledgerAppPool(t *testing.T, ctx context.Context, pool *pgxpool.Pool, password string) *pgxpool.Pool {
+func ledgerAppPool(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
+	password := postgrestest.SharedRolePassword
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", password))
 	require.NoError(t, err)
 	appPool, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", password))
@@ -45,7 +46,7 @@ func ledgerAppPool(t *testing.T, ctx context.Context, pool *pgxpool.Pool, passwo
 // EMPTY-classification case, where there is no balance to promote.
 //
 // TestBalanceRolePromotion_RefusedOnceEntriesExist (roles_test.go) already
-// pins the rule, but through the container superuser. This adds the missing
+// pins the rule, but through the test superuser. This adds the missing
 // dimension -- the leaked application credential -- so the next reviewer
 // reading 003 does not have to re-derive it, and so a future migration that
 // re-replaces the guard without the history clause goes red here.
@@ -55,7 +56,7 @@ func ledgerAppPool(t *testing.T, ctx context.Context, pool *pgxpool.Pool, passwo
 func TestBalanceRolePromotion_RefusedForLedgerApp(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
-	app := ledgerAppPool(t, ctx, pool, "mig024-promo-password-not-a-real-secret") //nolint:gosec // test-only credential
+	app := ledgerAppPool(t, ctx, pool) //nolint:gosec // test-only credential
 
 	curUID := postgrestest.SeedCurrencyWithExponent(t, pool, "M024PROMO", "Promo Unit", 2)
 	jtUID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
@@ -100,7 +101,7 @@ func TestBalanceRolePromotion_RefusedForLedgerApp(t *testing.T) {
 func TestMigration024_AnchorObservationsAreOwnerWritten(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
-	app := ledgerAppPool(t, ctx, pool, "mig024-anchor-password-not-a-real-secret") //nolint:gosec // test-only credential
+	app := ledgerAppPool(t, ctx, pool) //nolint:gosec // test-only credential
 
 	_, err := app.Exec(ctx, `
 		INSERT INTO anchor_observations (uid, observed_seq, observed_head)

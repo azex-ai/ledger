@@ -18,6 +18,7 @@ package core_test
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -52,9 +53,16 @@ func TestPostgresFixtureFailsRatherThanSkipsWhenTheServerIsAbsent(t *testing.T) 
 	assert.Containsf(t, src, "require.NoErrorf(t, admin.Ping(ctx)",
 		"internal/postgrestest no longer fails the test when the test server cannot be reached. "+
 			"That error is the one that used to be swallowed as a skip (F-9); it must reach the test as a failure")
-	for _, forbidden := range []string{"testcontainers", "docker"} {
-		assert.NotContainsf(t, strings.ToLower(src), forbidden,
-			"internal/postgrestest must not depend on %s: the suite runs against one PostgreSQL server (docs/TESTING.md)", forbidden)
+	files, err := filepath.Glob("../internal/postgrestest/*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		require.NoError(t, err)
+		for _, forbidden := range []string{"testcontainers", "docker"} {
+			assert.NotContainsf(t, strings.ToLower(string(raw)), forbidden,
+				"%s must not depend on %s: the suite runs against one PostgreSQL server (docs/TESTING.md)", f, forbidden)
+		}
 	}
 }
 
@@ -71,6 +79,10 @@ func TestMakeTestRunsAgainstOneServerWithoutDocker(t *testing.T) {
 		"the `test` target must run the uncached race suite")
 	assert.Containsf(t, target, "pgtestclean",
 		"the `test` target must remove what the run left on the shared server (internal/pgtestenv/pgtestclean)")
+	assert.Containsf(t, target, "go test -race -timeout 15m -count=1 ./... || status=$$?",
+		"the `test` target must capture go test's exit status before cleanup runs")
+	assert.Containsf(t, target, "|| { [ $$status -ne 0 ] || status=1; }",
+		"a cleanup failure may only turn a passing run into a failure, never overwrite go test's status")
 	assert.Containsf(t, target, "exit $$status",
 		"the `test` target must exit with go test's status, not the cleanup's alone")
 }

@@ -60,7 +60,7 @@ func setupSignedHoldFixture(t *testing.T, pool *pgxpool.Pool, holder int64, keyI
 		ledger: ledger,
 		reserver: postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, verifier)).
 			WithAuth(attestor, verifier),
-		attacker: ledgerAppPool(t, ctx, pool, "w4-signed-holds-app-credential"),
+		attacker: ledgerAppPool(t, ctx, pool),
 		holder:   holder,
 	}
 }

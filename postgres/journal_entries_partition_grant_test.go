@@ -70,7 +70,7 @@ func createdAtWithinPartition(t *testing.T, partition string) time.Time {
 func TestLedgerAppCannotInsertIDDirectlyIntoAnyExistingPartition(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
-	appPool := newAppPool(t, pool, "roles-test-app-partition-grant-not-a-real-secret") //nolint:gosec // test-only credential
+	appPool := newAppPool(t, pool) //nolint:gosec // test-only credential
 
 	rows, err := pool.Query(ctx, `
 		SELECT c.relname

@@ -182,7 +182,7 @@ func TestMigration027_UnlinkEventJournalIsRefusedForLedgerApp(t *testing.T) {
 
 	f := setupEventWedge(t, ctx, pool, svc, "B")
 
-	const appPassword = "mig027-app-password-not-a-real-secret" //nolint:gosec // test-only credential
+	const appPassword = postgrestest.SharedRolePassword
 	_, err = pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
 	require.NoError(t, err)
 	app, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", appPassword))
