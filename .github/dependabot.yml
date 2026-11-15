@@ -16,12 +16,19 @@ updates:
       web-deps:
         patterns: ["*"]
     ignore:
-      # TypeScript 7 (the Go-native compiler) is a deliberate, separate
-      # decision: typescript-eslint has no TS 7 support planned before 7.1
-      # and `next build`'s type check needs an experimental flag. Until that
-      # is taken, keep proposing 5.x/6.x only.
+      # TypeScript 6+ is blocked on tsup, not on our tsconfig. tsup's dts
+      # build injects `baseUrl: compilerOptions.baseUrl || "."`
+      # (tsup/dist/rollup.js), and TS 6.0 turned `baseUrl` from a deprecation
+      # into a hard error (TS5101), so `npm run -w @azex/ledger-react build`
+      # fails on any TS >= 6 (2026-09-07, PR #32). tsup 8.5.1 is latest and
+      # has not shipped since 2025-11, so this will not resolve upstream on
+      # its own -- moving off TS 5.x means replacing the dts path (tsup
+      # `dts: false` + a separate `tsc --emitDeclarationOnly`).
+      # TypeScript 7 (the Go-native compiler) is a further, separate decision:
+      # typescript-eslint has no TS 7 support planned before 7.1 and
+      # `next build`'s type check needs an experimental flag.
       - dependency-name: typescript
-        versions: [">=7.0.0"]
+        versions: [">=6.0.0"]
       # eslint 10: eslint-config-next only requires >=9; move the lint
       # runtime on its own, not inside the weekly group.
       - dependency-name: eslint
