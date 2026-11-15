@@ -40,7 +40,7 @@ export function getOk<T>(
   const payload = Array.isArray(data) ? { list: data } : data;
   return http.get(`${BASE}${path}`, ({ request }) => {
     const url = new URL(request.url);
-    for (const param of opts?.requiredQuery ?? []) {
+    for (const param of opts?.requiredQuery ?? (/^\/api\/v1\/balances\/[^/]+$/.test(path) ? ["currency_uid"] : [])) {
       const value = url.searchParams.get(param);
       if (value === null || value === "") return missingParamError(param);
     }

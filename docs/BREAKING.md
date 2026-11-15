@@ -31,6 +31,287 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `getBalances` / `useBalances` / `prefetchBalances`: currency is required
+
+The existing Go endpoint requires `currency_uid`; the SDK previously omitted
+it and real requests failed with HTTP 400. Pass the currency UID as the second
+argument to `client.getBalances` and `useBalances`, or the fourth argument to
+`prefetchBalances(queryClient, client, holder, currencyUid)`. Pass it as the third
+argument to `ledgerKeys.balances(scope, holder, currencyUid)` as well. The list
+key ends in `[holder, currencyUid, "classifications"]`, so it cannot collide with
+the existing aggregate-by-currency object key.
+
+**What a consumer must do.** Supply one explicitly selected currency and update
+any direct cache seeding. These balances are booked quantities, not balances
+after reservation holds. No HTTP contract or core accounting behavior changed.
+`getJournal` keeps its public `{ journal, entries }` result and now adapts the
+actual flat wire response correctly.
+
+### Bundled dashboard mutations require an exact same-origin `Origin`
+
+The dashboard BFF and login/logout routes reject absent, opaque, malformed and
+cross-origin `Origin` headers on non-GET/HEAD requests, including a different
+port on the same host. The session cookie alone does not authorize that origin.
+
+**What a consumer must do.** Browser requests from the dashboard work unchanged.
+For scripted dashboard requests, send its exact origin. Behind a reverse proxy,
+set the server-only `DASHBOARD_PUBLIC_ORIGIN` to the canonical public HTTP(S)
+origin (scheme, hostname and optional port, no path/query/credentials). Otherwise
+the request Host authority plus framework URL scheme supply the origin;
+missing/malformed Host is rejected. This preserves loopback host aliases that
+Next.js normalizes in its URL. The check does not read forwarding headers;
+proxies that rewrite Host or terminate TLS should configure the public origin.
+This applies to the bundled host, not the standalone Go API or SDK host
+applications.
+
+### `ledgerKeys` / `LedgerClientConfig.cacheScope`: scope-first cache keys
+
+All admin query keys and invalidation prefixes now require the resolved client
+scope, for example `ledgerKeys.balances(client.cacheScope, holder, currencyUid)` and
+`ledgerKeys.all(client.cacheScope)`. Old unscoped factory calls no longer compile.
+The optional public input is `cacheScope: { backend: string; identity: string }`;
+`client.cacheScope` is the resolved `LedgerQueryScope`, not that input object.
+
+**What a consumer must do.** Update direct cache reads/seeding/invalidation and
+share the same non-secret logical scope between SSR and browser clients.
+Default scopes are isolated per client and cannot hydrate a different client.
+Change explicit identity on login/logout, tenant/account switches and permission
+changes, including hidden BFF cookie changes. Different URLs may name the same
+backend; identical URLs may serve different identities. Never use a token,
+cookie, API key or private URL as a scope. A new API key does not override an
+unchanged explicit identity. Retained host QueryClients can retain old entries;
+scope isolation does not promise to erase them. See the
+[frontend guide](frontend.md#server-prefetch-rsc).
+
+### `LEDGER_CACHE_BACKEND_ID`: required for the bundled production dashboard
+
+The `web/` host resolves a public logical backend ID at request time. Production
+must set `LEDGER_CACHE_BACKEND_ID`; development defaults to `local-ledger`.
+Change it when changing the actual backend. Root layout cookie access makes
+pages dynamic, and login/logout `router.refresh()` updates the provider scope.
+Builds do not require deployment credentials or this setting.
+
+**What a consumer must do.** Add this non-secret value to production runtime
+configuration. It is a host setting, not an environment variable read by the
+framework-independent React package. Keep API/auth secrets server-side.
+
+### `LedgerClient.createBooking` / `transitionBooking`: generated input bodies
+
+Mutation JSON inputs now derive from the generated OpenAPI operation bodies.
+Booking metadata is `Record<string, string>`, matching the Go input; nested
+objects and arbitrary values were never valid server booking metadata.
+The exported legacy `CreateBookingBody` / `TransitionBookingBody` types remain
+available but are no longer the source of these client parameter types.
+
+**What a consumer must do.** Type new inputs with
+`Parameters<LedgerClient["createBooking"]>[0]` and
+`Parameters<LedgerClient["transitionBooking"]>[1]`, and explicitly choose string
+metadata labels. Transition's third `idempotencyKey` argument remains required;
+its header carries the key omitted from the second argument. Retain the same key
+on delivery retry. Other generated inputs now accept their actual optional wire
+fields, including journal event/actor/effective time, template metadata,
+classification lifecycle, journal-type holder kind and transition source.
+This change does not add a general runtime DTO validator or new endpoints.
+
+### `LedgerClient.previewTemplate`: custom amounts belong in `amounts`
+
+Use `{ holder_id, currency_uid, amounts: { gross: "100", fee: "2.5" } }`.
+The single-string shorthand `{ holder_id, currency_uid, amount: "100" }` remains
+and is serialized as `amounts: { amount: "100" }`. Arbitrary flattened amount
+keys and numeric amounts are not supported inputs. Supplying both `amount` and
+`amounts`, or neither, rejects the Promise with `TypeError` before fetch, even
+when both forms would contain the same value. TypeScript's union alone does not
+exclude every mixed structural assignment; handle the asynchronous failure.
+
+**What a consumer must do.** Move custom fields into `amounts`, keep decimal
+strings, and select exactly one input form. No server wire contract changed.
+
+### `Service.Capture` / `examples/credits-topup`: additive facade, explicit demo boundary
+
+`CaptureInput`, `CaptureResult`, `Service.Capture` and the separate
+`core.ReservationReader` are additive Go APIs. Existing `Reserver` and
+`QueryProvider` implementations gain no required methods. There is no new
+Capture HTTP route or SDK method. Capture accepts only available user entries;
+memo-bearing fee templates require explicit host composition.
+
+The credits demo's v3 namespace is for a **fresh dedicated demo database**.
+Its prior `:settle` / `:charge` suffixes remain, but Capture adds reserved
+`capture_mode` and `capture_template_code` metadata alongside `reservation_uid`.
+Those payloads differ from old submitted events.
+
+**What a consumer must do.** Do not re-key, rewrite or automatically replay old
+events through Capture to bypass conflicts. Preserve their original handler or
+use an explicit reconciliation/migration policy. The demo rejects legacy demo
+journals/reservations before configuration/accounting writes; schema bootstrap
+can still run first. Same v3 event IDs/payloads replay normally. Changing
+full/partial mode may return `ErrInvalidTransition` before the journal conflict
+check. Propagate transaction errors; this facade has no nested savepoint.
+Unsigned transaction journals and the verified-hold restrictions are documented
+in [Recipe 4](COOKBOOK.md#recipe-4--spending-credits-reserve--capture).
+
+### `@azex/ledger-react` / `createLedgerClient`: holder IDs must be safe integers
+
+The numeric admin SDK now rejects holder IDs outside JavaScript's safe integer
+range (`-9007199254740991` through `9007199254740991`), as well as fractional
+and non-finite values. Requests are checked before fetch across holder path,
+query and body fields, including batch holders and journal entries. Successful
+responses are checked before returning holder-bearing rows, nested entries,
+balances and reconciliation details; one unsafe holder rejects the entire
+response. `createServerLedgerClient` delegates to the same boundary.
+
+The error is a `RangeError` with `name: "UnsafeHolderError"`,
+`code: "LEDGER_UNSAFE_HOLDER"` and a `location` such as
+`request.body.holder_ids[1]` or `response.list[1].account_holder`. A response
+error does not undo a server-side mutation; retain the original idempotency
+key when reconciling or retrying that operation.
+
+**What a consumer must do.** Keep SDK holder IDs within that exact range and
+handle the error instead of continuing with a rounded ID. Both
+`9007199254740992` and `9007199254740993` are rejected even though ordinary
+JavaScript decoding collapses them to the same number. Never truncate, hash,
+take a modulus or call `Number`/`parseInt` on a large external identifier to
+make it fit. New host integrations may maintain an authoritative mapping from
+external string IDs to stable safe ledger holder IDs. Existing large int64
+ledger holders need a host backend that preserves int64 (for example the Go
+library), or a separately versioned string-wire integration; do not silently
+remap existing accounts.
+
+The Go int64 and HTTP numeric wire contracts are unchanged. This SDK does not
+claim full int64 support. Negative system holders and zero sentinels remain
+subject to each endpoint's existing server-side rules. Metadata, template
+amount maps and actor IDs are not holder fields and are not checked by this
+boundary. UI text parsing is a separate integration concern.
+
+### `GET /holder/transactions` / `core.HolderTransaction.QuotesOmitted`: quotes only on a single-holder journal
+
+**Landed (2026-10-10 fix wave 2, second opinion Major 2).** A statement row's
+`quotes` used to be the journal's whole `conversion_quotes` metadata, while
+the row itself is filtered to one holder -- so on a journal with user-side
+entries for several holders (a batch charge) each holder saw every holder's
+usage, rates and amounts. `quotes` is now returned only when every user-side
+entry of the journal belongs to the requesting holder; otherwise it is `[]`
+and the new field `quotes_omitted` (`core.HolderTransaction.QuotesOmitted`,
+always on the wire, `false` by default) is `true`. Such a journal's quotes are
+not decoded at all, so a corrupt quote on a shared journal no longer fails the
+page with `core.ErrCorruptData`. `@azex/ledger-react`'s `WalletTransaction`
+gains a required `quotes_omitted: boolean`, both skins render it through the
+new `quotesOmittedLabel` prop (default "Breakdown unavailable"), and the
+headless entry exports `describeQuoteLine` and `DEFAULT_QUOTES_OMITTED_LABEL`.
+
+**What a consumer must do.** A host that posts one journal for several users
+and wants each to see their own breakdown must post one journal per holder.
+A client that rendered "no quotes" as "no conversion" should check
+`quotes_omitted`. TypeScript code that constructs a `WalletTransaction`
+literal (test fixtures, mocks) must add `quotes_omitted`.
+
+### `ledger.ExchangeInput.FundingUID` / `SellTemplateCode` / `BuyTemplateCode`: checked, not trusted
+
+**Landed (2026-10-10 fix wave 2, second opinion Major 1 + security review m-5).**
+`Exchange` now verifies, inside its transaction, what the two rendered FX
+journals did. The strengthened available-balance contract requires the sell
+journal's available net to equal `-Quantity` and the buy journal's available net
+to equal `+Quote.TargetAmount`, signed by each classification's normal side.
+Every other user classification must independently have zero net change;
+pending/locked/memo cannot offset one another or an incorrect available amount.
+Each leg is restricted to its currency and the holder/system-counterpart pair.
+A template
+override that does anything else -- e.g. `"fx_buy"` on both legs, which used to
+credit the holder twice -- is `core.ErrInvalidInput` and everything rolls back.
+`FundingUID` must be the uid of a journal with an entry for `HolderID` in the
+source currency; a uid that does not exist, belongs to another holder or is in
+another currency is `core.ErrInvalidInput`, refused before any write.
+
+**What a consumer must do.** Pass the deposit *journal* uid as `FundingUID` --
+for a booking-modelled deposit, the confirmed booking's `JournalUID`, not the
+booking uid (`docs/COOKBOOK.md` used to show the booking uid). Custom
+templates must satisfy the available and non-available rules above; former
+role-bearing-total overrides may now be refused, including on replay. Do not
+change an already committed event's key or rewrite its entries to evade this
+check; retain a compatible historical handler or reconcile explicitly. A retry of an exchange
+that originally committed with a funding reference the new check refuses
+fails with `core.ErrInvalidInput` instead of replaying.
+
+### `core.ConversionQuote.Validate`: `target_amount` must follow from the quote's own rate
+
+**Landed (2026-10-10 fix wave 2, security review m-5).** `Validate` -- and so
+`EncodeConversionQuotes`, `DecodeConversionQuotes` and every journal write
+carrying `metadata["conversion_quotes"]` (`JournalInput.Validate`) -- now
+recomputes the conversion through `core.FixedRate.Convert` on the quote's own
+fields and requires `target_amount` to equal `source_quantity x rate` rounded
+with `rounding` at `target_exponent`, and `source_quantity` to fit
+`source_exponent`. A quote that breaks either (`1 x 1000 -> 999999`, an amount
+carrying more places than `target_exponent`, a rounding mode that did not
+produce the amount) is `core.ErrInvalidInput` (`400` / `10001`); a quantity
+finer than `source_exponent` also keeps `core.ErrPrecisionExceeded` in the
+chain. Before, `Validate` did not recompute, so the holder statement could
+explain a charge with numbers that do not follow from its rate.
+
+**What a consumer must do.** Nothing, if every quote comes from
+`core.FixedRate.Quote` (as `Exchange` and `examples/credits-topup` do): those
+are consistent by construction. A host that builds `ConversionQuote` values
+by hand -- or prices a line by summing sub-amounts under one quote -- must make
+each quote's `target_amount` the rounded product of its own quantity and rate,
+or write one quote per priced line. Stored journals are not re-validated on
+write, but the holder statement decodes with the same rule: a pre-existing
+row whose quote does not satisfy it fails `GET /holder/transactions` with
+`core.ErrCorruptData` (`500` / `19001`), as any undecodable quote does.
+
+### `core.CurrencyInput.Validate` / `POST /currencies`: currency-code charset
+
+**Landed (2026-10-09 security review m-2).** A currency code is now 1-64
+characters from `[A-Za-z0-9_.-]`. It used to be "non-empty", so a code with
+whitespace, control characters or Unicode format characters (a
+right-to-left override U+202E, a zero-width joiner U+200D) was accepted and
+then rendered verbatim on holder statements and conversion quotes, where it
+can reverse or disguise what the line says. The same rule now applies to
+`core.FixedRate.Validate` (hence `Convert` / `Quote` / `Exchange`) and
+`core.ConversionQuote.Validate`'s `SourceCode` / `TargetCode`, and both now
+also require `Version` to be valid UTF-8 without control characters (encoding/json turns every invalid
+byte into U+FFFD, so two different invalid versions encoded to one payload and
+a changed-version retry replayed instead of raising `core.ErrConflict`), so
+`EncodeConversionQuotes`, `DecodeConversionQuotes` and every journal write
+carrying `metadata["conversion_quotes"]` refuse such a code with
+`core.ErrInvalidInput` (`400` / `10001`).
+
+**What a consumer must do.** Nothing, if your codes look like `USDT`,
+`INPUT_TOKEN`, `USDT-late` or `USDC.e` -- every code in this repository's
+presets, examples and fixtures already does. A code with whitespace or any
+non-ASCII character must be renamed before it is created;
+existing `currencies` rows are not re-validated, but a stored code that
+breaks the rule can no longer be quoted or exchanged (`FixedRate.Validate`
+rejects it), so rename such a row before relying on `Exchange` for it.
+
+### `core.DecodeConversionQuotes`: decimal fields must be JSON strings
+
+**Landed (2026-10-09 security review I-a).** `source_quantity`, `rate` and
+`target_amount` are accepted only as JSON strings -- the spelling
+`EncodeConversionQuotes` writes. A bare number (`"rate":1000`), `null`, or an
+absent field used to parse (and an absent quantity read as zero); it is now
+`core.ErrInvalidInput`. Since metadata participates in the idempotency
+payload comparison, two spellings of one quote compared unequal.
+
+**What a consumer must do.** Build the metadata value with
+`core.EncodeConversionQuotes` instead of hand-written JSON. No released
+version ever stored a number spelling.
+
+### `GET /holder/transactions` / `ListHolderTransactions`: undecodable stored quotes are `core.ErrCorruptData` (`500` / `19001`)
+
+**Landed (2026-10-09 security review M-1).** A journal whose stored
+`metadata["conversion_quotes"]` fails `core.DecodeConversionQuotes` -- which
+only direct SQL or a bug can produce, the write path runs the same decoder --
+still fails the whole page (a statement silently missing a charge's
+explanation is the failure that surface exists to prevent), but it is now
+classified as the new sentinel `core.ErrCorruptData`, mapped to the new
+bizcode `bizcode.CorruptData` = `19001`, HTTP `500`, **not** retryable (new
+band `19000`-`19099`). It used to surface as `core.ErrInvalidInput` /
+`400` / `10001`, which blamed the caller's request for a stored row. The
+error text names the journal by uid, not by its internal id.
+
+**What a consumer must do.** A client that treated `10001` from this endpoint
+as "my request was malformed" should expect `19001` instead and route it to
+an operator: the named journal's metadata needs repair. Library-mode callers
+match `errors.Is(err, core.ErrCorruptData)`; `core.IsRetryable` reports false.
+
 ### `core.Round` and `core.ConvertAt` return `(decimal.Decimal, error)`
 
 **Landed (Wave 5 recheck R-4; invariant I-70).**

@@ -125,6 +125,9 @@ func balance(t *testing.T, svc *ledger.Service, currency, want, held string) {
 	hold, err := svc.Reserver().HeldAmount(t.Context(), userID, currency)
 	require.NoError(t, err)
 	require.True(t, hold.Equal(decimal.RequireFromString(held)), "held = %s, want %s", hold, held)
+	breakdown, err := svc.BalanceReader().GetBalanceBreakdown(t.Context(), userID, currency)
+	require.NoError(t, err)
+	require.True(t, breakdown.Available.Equal(got.Sub(hold)), "spendable = %s, book balance = %s, held = %s", breakdown.Available, got, hold)
 }
 
 func deposit(t *testing.T, svc *ledger.Service, currency string) {
@@ -161,6 +164,10 @@ func TestCreditsScenario_RestartIsNoOp(t *testing.T) {
 	balance(t, svc, usdc, "0", "0")
 	count := journalCount(t, admin)
 	require.Equal(t, 7, count) // deposit + purchase pair + fixed + metered + two stream events
+	againUSDC, againCredits, err := setup(ctx, svc, testPricing(t))
+	require.NoError(t, err, "current Capture demo events must not trigger the legacy guard")
+	require.Equal(t, usdc, againUSDC)
+	require.Equal(t, credits, againCredits)
 	require.NoError(t, scenario(ctx, svc, usdc, credits, testPricing(t)))
 	require.Equal(t, count, journalCount(t, admin))
 	require.NoError(t, checkFinalBalances(ctx, svc, usdc, credits, decimal.RequireFromString("912.875")))
@@ -237,9 +244,15 @@ func TestUsage_ReplayOvershootAndFailedCharge(t *testing.T) {
 		ClassificationUID: wallet.UID, Status: core.AccountPolicyStatusFrozen, EnforceMinBalance: true}
 	_, err = svc.AccountPolicies().SetPolicy(ctx, policy)
 	require.NoError(t, err)
-	require.Error(t, captureCredits(ctx, svc, r, decimal.NewFromInt(32), "usage", false))
+	require.ErrorIs(t, captureCredits(ctx, svc, r, decimal.NewFromInt(32), "usage", false), core.ErrAccountFrozen)
 	balance(t, svc, credits, "1000", "50")
 	require.Equal(t, 3, journalCount(t, admin))
+	stored, err := svc.ReservationReader().GetReservation(ctx, r.UID)
+	require.NoError(t, err)
+	require.Equal(t, core.ReservationStatusActive, stored.Status)
+	var receipts int
+	require.NoError(t, admin.QueryRow(ctx, "SELECT count(*) FROM reservation_operation_receipts WHERE idempotency_key=$1", "usage:settle").Scan(&receipts))
+	require.Zero(t, receipts, "failed Capture charge must roll back its settlement receipt")
 	policy.Status = core.AccountPolicyStatusActive
 	_, err = svc.AccountPolicies().SetPolicy(ctx, policy)
 	require.NoError(t, err)

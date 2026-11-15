@@ -30,8 +30,7 @@ function CreateClassificationModal() {
   const [form, setForm] = useState<{ code: string; name: string; normal_side: "debit" | "credit"; is_system: boolean; balance_role: BalanceRole }>({ code: "", name: "", normal_side: "debit", is_system: false, balance_role: "available" });
   // J-8 (2026-09-02 web audit): see ClassificationsPage (shadcn skin)'s
   // matching comment — server-side field-level errors (api-contract.md §1's
-  // message.fields) used to collapse into the same generic toast as any
-  // other error.
+  // message.fields) used to collapse into a generic toast shared by all errors.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mutation = useCreateClassification();
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useState } from "react";
 import { Button, Input, Label, Table, TextField } from "@heroui/react";
 import { toast } from "sonner";
@@ -47,9 +48,9 @@ export function SnapshotsPage() {
   // holder-less search silently produced zero requests and rendered "No
   // snapshots found", indistinguishable from a real empty result (J-2).
   function handleSearch() {
-    const holder = form.holder ? parseInt(form.holder, 10) : undefined;
-    if (!holder) {
-      toast.error("Holder is required");
+    const holder = parseHolderInput(form.holder, "account");
+    if (typeof holder !== "number") {
+      toast.error(holder ?? "Holder is required");
       return;
     }
     if (!form.currency_uid.trim()) {

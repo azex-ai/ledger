@@ -196,7 +196,8 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
       - run: go build ./...
-      - run: make test-consumer
+      - name: Independent consumers (root, EVM, R2; GOWORK=off)
+        run: make test-consumer
       - run: go build ./...
         working-directory: chains/evm
       - run: go build ./...

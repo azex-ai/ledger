@@ -1,3 +1,4 @@
+import { testCacheScope, testQueryScope } from "../cache-scope";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -11,7 +12,7 @@ const BASE = "http://ledger.test";
 
 function wrapperWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
       {children}
     </LedgerProvider>
   );
@@ -45,7 +46,7 @@ describe("use-sweeps", () => {
       qc.getQueryCache().find({
         queryKey: [
           "ledger",
-          "bookings",
+          testQueryScope, "bookings",
           "sweep",
           { classificationUid: "cls-9", limit: 20 },
         ],

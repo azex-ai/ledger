@@ -27,7 +27,7 @@ export function useWithdrawals(
   const classification = useClassificationIdByCode(WITHDRAW_CODE);
   const classificationUid = classification.uid;
   const query = useInfiniteQuery({
-    queryKey: ledgerKeys.bookings(WITHDRAW_CODE, { ...params, classificationUid, limit }),
+    queryKey: ledgerKeys.bookings(client.cacheScope, WITHDRAW_CODE, { ...params, classificationUid, limit }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listBookings({
         holder: params.holder,

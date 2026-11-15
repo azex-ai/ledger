@@ -1,0 +1,292 @@
+$ npm pack --workspace @azex/ledger-react --pack-destination /Users/aaron/projects/_worktrees/ledger/codex/review-library-261010-r1/.hive-tmp/library-audit --json
+[
+  {
+    "id": "@azex/ledger-react@0.6.0",
+    "name": "@azex/ledger-react",
+    "version": "0.6.0",
+    "size": 121068,
+    "unpackedSize": 751201,
+    "shasum": "c58df871889bc81d698dd5268776e04fc8e2dbe1",
+    "integrity": "sha512-2ztslPAFNBh+5TttB4bKnhUORDELmEMenuwFULDZhX2+YaKftuyBEcexPLdhMugfL7hn19/4EVtKHzsnco7Axg==",
+    "filename": "azex-ledger-react-0.6.0.tgz",
+    "files": [
+      {
+        "path": "README.md",
+        "size": 13520,
+        "mode": 420
+      },
+      {
+        "path": "dist/BalancesPage-4WQQRJXT.js",
+        "size": 365,
+        "mode": 420
+      },
+      {
+        "path": "dist/BalancesPage-HECW56B3.js",
+        "size": 305,
+        "mode": 420
+      },
+      {
+        "path": "dist/charts.d.ts",
+        "size": 733,
+        "mode": 420
+      },
+      {
+        "path": "dist/charts.js",
+        "size": 545,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-2NEWJW2M.js",
+        "size": 4818,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-2PQ5QNBL.js",
+        "size": 6802,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-3IE2Z3PD.js",
+        "size": 1480,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-4K7BVGVG.js",
+        "size": 1277,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-4OC7E773.js",
+        "size": 1955,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-5X4FD56Y.js",
+        "size": 1357,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-CGRZJI72.js",
+        "size": 2348,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-E6I4CTFX.js",
+        "size": 7556,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-H2KPSI73.js",
+        "size": 7320,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-IIHZIUFP.js",
+        "size": 373,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-KXURWADJ.js",
+        "size": 10587,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-KYIXAOWT.js",
+        "size": 8963,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-LQ4WIY4U.js",
+        "size": 2451,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-LQHFD4C7.js",
+        "size": 9557,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-OV6DNDFV.js",
+        "size": 8910,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-P4OIKD3S.js",
+        "size": 1705,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-PZHF4SJS.js",
+        "size": 1673,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-RASCW575.js",
+        "size": 7816,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-RCHCPTRF.js",
+        "size": 5555,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-REUDDBFZ.js",
+        "size": 13333,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-RZHE4JPL.js",
+        "size": 1738,
+        "mode": 420
+      },
+      {
+        "path": "dist/chunk-UDDHKFQZ.js",
+        "size": 1971,
+        "mode": 420
+      },
+      {
+        "path": "dist/client-D3-IzkJF.d.ts",
+        "size": 12300,
+        "mode": 420
+      },
+      {
+        "path": "dist/DashboardPage-DVIRCGJN.js",
+        "size": 337,
+        "mode": 420
+      },
+      {
+        "path": "dist/DashboardPage-PXHJTI4E.js",
+        "size": 277,
+        "mode": 420
+      },
+      {
+        "path": "dist/headless.d.ts",
+        "size": 65464,
+        "mode": 420
+      },
+      {
+        "path": "dist/headless.js",
+        "size": 3577,
+        "mode": 420
+      },
+      {
+        "path": "dist/heroui-charts.d.ts",
+        "size": 655,
+        "mode": 420
+      },
+      {
+        "path": "dist/heroui-charts.js",
+        "size": 423,
+        "mode": 420
+      },
+      {
+        "path": "dist/heroui.css",
+        "size": 46618,
+        "mode": 420
+      },
+      {
+        "path": "dist/heroui.d.ts",
+        "size": 6120,
+        "mode": 420
+      },
+      {
+        "path": "dist/heroui.js",
+        "size": 162715,
+        "mode": 420
+      },
+      {
+        "path": "dist/index.d.ts",
+        "size": 6095,
+        "mode": 420
+      },
+      {
+        "path": "dist/index.js",
+        "size": 165344,
+        "mode": 420
+      },
+      {
+        "path": "dist/nav-BIoXrmjx.d.ts",
+        "size": 1124,
+        "mode": 420
+      },
+      {
+        "path": "dist/server.d.ts",
+        "size": 5395,
+        "mode": 420
+      },
+      {
+        "path": "dist/server.js",
+        "size": 3182,
+        "mode": 420
+      },
+      {
+        "path": "dist/shell-D4ecmCsv.d.ts",
+        "size": 8324,
+        "mode": 420
+      },
+      {
+        "path": "dist/styles.css",
+        "size": 69633,
+        "mode": 420
+      },
+      {
+        "path": "dist/wallet-headless.d.ts",
+        "size": 10965,
+        "mode": 420
+      },
+      {
+        "path": "dist/wallet-headless.js",
+        "size": 1543,
+        "mode": 420
+      },
+      {
+        "path": "dist/wallet-heroui.d.ts",
+        "size": 6359,
+        "mode": 420
+      },
+      {
+        "path": "dist/wallet-heroui.js",
+        "size": 17832,
+        "mode": 420
+      },
+      {
+        "path": "dist/wallet.d.ts",
+        "size": 6417,
+        "mode": 420
+      },
+      {
+        "path": "dist/wallet.js",
+        "size": 23027,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 2462,
+        "mode": 420
+      }
+    ],
+    "entryCount": 51,
+    "bundled": []
+  }
+]
+
+exit=0
+$ npm install --ignore-scripts --omit=optional --no-audit --no-fund
+
+up to date in 133ms
+
+exit=0
+$ /Users/aaron/projects/_worktrees/ledger/codex/review-library-261010-r1/.hive-tmp/library-audit/consumer/node_modules/.bin/tsc --noEmit
+
+exit=0
+$ node --input-type=module -e for (const name of ["@azex/ledger-react", "@azex/ledger-react/server", "@azex/ledger-react/headless", "@azex/ledger-react/charts", "@azex/ledger-react/wallet", "@azex/ledger-react/wallet/headless"]) { await import(name); console.log("loaded", name); }
+loaded @azex/ledger-react
+loaded @azex/ledger-react/server
+loaded @azex/ledger-react/headless
+loaded @azex/ledger-react/charts
+loaded @azex/ledger-react/wallet
+loaded @azex/ledger-react/wallet/headless
+
+exit=0
+External tarball consumer succeeded; HeroUI installed = False

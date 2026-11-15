@@ -124,7 +124,7 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 		}
 		net, err := numericToDecimal(r.NetAmount)
 		if err != nil {
-			err = fmt.Errorf("postgres: list holder transactions: journal %d: %w", r.JournalID, err)
+			err = fmt.Errorf("postgres: list holder transactions: journal %s: %w", pgToUID(r.JournalUid), err)
 			ledgerotel.RecordError(span, err)
 			return nil, "", err
 		}
@@ -137,6 +137,41 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 		if net.IsNegative() {
 			direction = core.HolderTransactionOut
 		}
+		// Absent is the empty string (COALESCE in holder.sql). Present but
+		// undecodable cannot be written through this library's write path
+		// (JournalInput.Validate runs the same decoder), but direct SQL or a
+		// bug can still put such a row in the table. It is reported, not
+		// tolerated: a statement that silently dropped a charge's
+		// explanation would be the working-agreements §3 failure this whole
+		// surface exists to avoid. The page fails as a whole, classified as
+		// core.ErrCorruptData -- the stored row is at fault, not the
+		// caller's request -- so the decoder's own ErrInvalidInput is
+		// deliberately NOT kept in the chain (%v, not %w): it would map the
+		// failure to 10001 and tell the holder to fix a request that was
+		// fine.
+		//
+		// Quotes are journal-level and carry no holder, while this row is
+		// one holder's slice of the journal. Only a journal whose user-side
+		// entries all belong to this holder (UserHolders == 1) can show
+		// them without showing another holder's usage and prices. Any
+		// other journal that recorded quotes gets QuotesOmitted instead of
+		// an empty list that would read as "no conversion happened"
+		// (working-agreements §3: a degradation must leave a trace). Its
+		// quotes are not decoded at all -- they are not this holder's to
+		// read, and a corrupt one must not fail a page that cannot show it.
+		var quotes []core.ConversionQuote
+		quotesOmitted := false
+		if r.ConversionQuotes != "" && r.UserHolders != 1 {
+			quotesOmitted = true
+		} else if r.ConversionQuotes != "" {
+			quotes, err = core.DecodeConversionQuotes(r.ConversionQuotes)
+			if err != nil {
+				err = fmt.Errorf("postgres: list holder transactions: journal %s: %w: %v",
+					pgToUID(r.JournalUid), core.ErrCorruptData, err)
+				ledgerotel.RecordError(span, err)
+				return nil, "", err
+			}
+		}
 		items = append(items, core.HolderTransaction{
 			UID:           pgToUID(r.JournalUid),
 			Kind:          r.Kind,
@@ -148,6 +183,8 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 			OccurredAt:    r.EffectiveAt,
 			ReversalOfUID: r.ReversalOfUid,
 			Memo:          r.Memo,
+			Quotes:        quotes,
+			QuotesOmitted: quotesOmitted,
 		})
 	}
 

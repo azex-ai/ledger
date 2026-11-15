@@ -1,5 +1,7 @@
 "use client";
 
+import { fiveSkeletonRows } from "../../lib/skeleton-slots";
+
 import type { ReactNode } from "react";
 import { Button, Card, Chip, Skeleton, cn } from "@heroui/react";
 import { ReceiptText } from "lucide-react";
@@ -7,12 +9,14 @@ import { EmptyState, ErrorState } from "../../heroui/shared";
 import { formatSignedAmount, formatUTC } from "../../lib/utils";
 import type { WalletTransaction } from "../client";
 import { useWalletTransactions } from "../hooks";
+import { describeQuoteLine, type UnitLabels } from "../quote";
 
 /*
  * Wallet transaction list (HeroUI skin). Page logic mirrors the shadcn skin
  * (src/wallet/components/transaction-list.tsx) — keep in sync. The list is a
  * card of rows (not a Table), so the load-more control is a plain centered
- * Button rather than the table-coupled LoadMoreBar.
+ * Button rather than the table-coupled LoadMoreBar. Converted rows carry the
+ * same quote line, worded by the shared describeQuotes presenter.
  */
 
 export interface TransactionListProps {
@@ -30,6 +34,18 @@ export interface TransactionListProps {
    * migration note.
    */
   kindLabels?: Record<string, string>;
+  /**
+   * Label overrides keyed by unit code for the quote line under a converted
+   * row (`{ INPUT_TOKEN: "input tokens" }`) — the wording anchor for
+   * measured units, as `kindLabels` is for `kind`. Falls back to the code.
+   */
+  unitLabels?: UnitLabels;
+  /**
+   * Shown under a row whose quotes the server withheld because the journal
+   * also carries other holders' entries (`quotes_omitted`). Defaults to
+   * "Breakdown unavailable".
+   */
+  quotesOmittedLabel?: string;
   /** Full-row custom renderer (escape hatch); the default row otherwise. */
   renderItem?: (tx: WalletTransaction) => ReactNode;
   /** Page size for the cursor pagination. */
@@ -40,8 +56,8 @@ function ListSkeleton() {
   return (
     <Card>
       <Card.Content className="flex flex-col gap-3 py-4">
-        {Array.from({ length: 5 }, (_, i) => (
-          <div key={i} className="flex items-center justify-between gap-4">
+        {fiveSkeletonRows.map((slot) => (
+          <div key={slot.id} className="flex items-center justify-between gap-4">
             <Skeleton className="h-4 w-40 rounded" />
             <Skeleton className="h-4 w-24 rounded" />
           </div>
@@ -51,7 +67,18 @@ function ListSkeleton() {
   );
 }
 
-function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
+function DefaultRow({
+  tx,
+  label,
+  unitLabels,
+  quotesOmittedLabel,
+}: {
+  tx: WalletTransaction;
+  label: string;
+  unitLabels?: UnitLabels;
+  quotesOmittedLabel?: string;
+}) {
+  const quoteLine = describeQuoteLine(tx, unitLabels, quotesOmittedLabel);
   // J-21 (2026-09-02 web audit): fold `direction` into a signed string and
   // let formatSignedAmount own the sign/color, instead of hardcoding "+"/"-"
   // at the call site — display.ts's contract is that callers never re-derive
@@ -76,6 +103,16 @@ function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
           <time dateTime={tx.occurred_at}>{formatUTC(tx.occurred_at)}</time>
           {tx.memo !== "" && <> · {tx.memo}</>}
         </p>
+        {/* The quotes, "Breakdown unavailable" when the server withheld
+            them (quotes_omitted), or nothing -- see describeQuoteLine. */}
+        {quoteLine !== null && (
+          <p
+            className="text-muted whitespace-normal break-words text-xs tabular-nums"
+            title={quoteLine}
+          >
+            {quoteLine}
+          </p>
+        )}
       </div>
       <p
         className={cn(
@@ -94,6 +131,8 @@ function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
 /** The holder's transaction history, newest first, with Load More paging. */
 export function TransactionList({
   kindLabels,
+  unitLabels,
+  quotesOmittedLabel,
   renderItem,
   limit = 20,
 }: TransactionListProps = {}) {
@@ -128,6 +167,8 @@ export function TransactionList({
                   key={`${tx.uid}-${tx.currency_uid}`}
                   tx={tx}
                   label={kindLabels?.[tx.kind] ?? tx.kind_label}
+                  unitLabels={unitLabels}
+                  quotesOmittedLabel={quotesOmittedLabel}
                 />
               ),
             )}

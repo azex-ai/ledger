@@ -2,6 +2,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, test } from "vitest";
 import { server } from "../setup";
 import { createLedgerClient } from "../../src/client/client";
+import type { components } from "../../src/client/schema";
 
 const BASE = "http://ledger.test";
 const API_KEY = "secret-key";
@@ -25,6 +26,9 @@ function intercept(
   let captured: Captured | undefined;
   server.use(
     http[method](`${BASE}${path}`, async ({ request }) => {
+      if (method === "get" && /^\/api\/v1\/balances\/[^/]+$/.test(path) && !new URL(request.url).searchParams.get("currency_uid")) {
+        return HttpResponse.json({ code: 12003, message: { text: "currency_uid is required" }, data: null }, { status: 400 });
+      }
       let body: unknown = undefined;
       const text = await request.text();
       if (text) body = JSON.parse(text);
@@ -63,8 +67,15 @@ describe("journals + entries", () => {
   });
 
   test("getJournal", async () => {
-    const i = intercept("get", "/api/v1/journals/uid-7", {});
-    await client.getJournal("uid-7");
+    const wire = {
+      uid: "uid-7", journal_type_uid: "jt", idempotency_key: "event", total_debit: "1.23", total_credit: "1.23",
+      actor_id: 0, source: "host", metadata: { reference: "invoice" }, effective_at: "2026-10-10T00:00:00Z", created_at: "2026-10-10T00:00:00Z",
+      entries: [{ journal_uid: "uid-7", account_holder: 9, currency_uid: "usd", classification_uid: "wallet", entry_type: "debit", amount: "1.23", effective_at: "2026-10-10T00:00:00Z", created_at: "2026-10-10T00:00:00Z" }],
+    } satisfies NonNullable<components["schemas"]["JournalWithEntriesEnvelope"]["data"]>;
+    const i = intercept("get", "/api/v1/journals/uid-7", wire);
+    const result = await client.getJournal("uid-7");
+    const { entries, ...journal } = wire;
+    expect(result).toEqual({ journal, entries });
     expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals/uid-7`);
   });
 
@@ -131,8 +142,8 @@ describe("journals + entries", () => {
 describe("balances", () => {
   test("getBalances + getBalancesByCurrency", async () => {
     const a = intercept("get", "/api/v1/balances/9", []);
-    await client.getBalances(9);
-    expect(a.captured()?.url).toBe(`${BASE}/api/v1/balances/9`);
+    await client.getBalances(9, "cur-1");
+    expect(a.captured()?.url).toBe(`${BASE}/api/v1/balances/9?currency_uid=cur-1`);
 
     const b = intercept("get", "/api/v1/balances/9/cur-2", []);
     await client.getBalancesByCurrency(9, "cur-2");
@@ -157,7 +168,7 @@ describe("reservations", () => {
     );
   });
 
-  test("createReservation", async () => {
+  test("createReservation omits optional fields when absent", async () => {
     const i = intercept("post", "/api/v1/reservations", {});
     await client.createReservation({
       account_holder: 1,
@@ -166,7 +177,36 @@ describe("reservations", () => {
       idempotency_key: "k",
     });
     expect(i.captured()?.auth).toBe(`Bearer ${API_KEY}`);
-    expect(i.captured()?.body).toMatchObject({ amount: "5" });
+    expect(i.captured()?.body).toEqual({
+      account_holder: 1,
+      currency_uid: "uid-1",
+      amount: "5",
+      idempotency_key: "k",
+    });
+  });
+
+  test.each([
+    { expires_in_sec: 3600, require_verified_balance: true },
+    { expires_in_sec: 0, require_verified_balance: false },
+  ])("createReservation serializes generated options %j", async (options) => {
+    const i = intercept("post", "/api/v1/reservations", {});
+    const body = {
+      account_holder: 1,
+      currency_uid: "uid-1",
+      amount: "5.000000000000000001",
+      idempotency_key: "reserve-key",
+      ...options,
+    } satisfies components["schemas"]["ReserveInput"];
+
+    await client.createReservation(body);
+
+    expect(i.captured()).toEqual({
+      url: `${BASE}/api/v1/reservations`,
+      method: "POST",
+      auth: `Bearer ${API_KEY}`,
+      idempotencyKey: "reserve-key",
+      body,
+    });
   });
 
   test("settleReservation + releaseReservation (204)", async () => {
@@ -311,7 +351,7 @@ describe("templates", () => {
     const p = intercept("post", "/api/v1/templates/dep/preview", {
       entries: [],
     });
-    await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1" });
+    await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1", amounts: { amount: "1" } });
     expect(p.captured()?.url).toBe(`${BASE}/api/v1/templates/dep/preview`);
     expect(p.captured()?.body).toMatchObject({ holder_id: 1 });
   });

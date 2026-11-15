@@ -1,3 +1,4 @@
+import { testCacheScope, testQueryScope } from "../cache-scope";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
@@ -13,7 +14,7 @@ describe("useLedgerMutation", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
 
     const wrapper = ({ children }: { children: ReactNode }) => (
-      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
         {children}
       </LedgerProvider>
     );
@@ -27,9 +28,9 @@ describe("useLedgerMutation", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     const invalidated = spy.mock.calls.map((c) => c[0]?.queryKey);
-    expect(invalidated).toContainEqual(["ledger", "journals"]);
-    expect(invalidated).toContainEqual(["ledger", "balances"]);
-    expect(invalidated).toContainEqual(["ledger", "system-balances"]);
+    expect(invalidated).toContainEqual(["ledger", testQueryScope, "journals"]);
+    expect(invalidated).toContainEqual(["ledger", testQueryScope, "balances"]);
+    expect(invalidated).toContainEqual(["ledger", testQueryScope, "system-balances"]);
   });
 
   // M4 (2026-08-26 web audit): a fresh Idempotency-Key minted on every HTTP
@@ -40,7 +41,7 @@ describe("useLedgerMutation", () => {
   test("reuses the same idempotency key across a retry after failure, mints a new one after success", async () => {
     const qc = new QueryClient();
     const wrapper = ({ children }: { children: ReactNode }) => (
-      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
         {children}
       </LedgerProvider>
     );
@@ -92,7 +93,7 @@ describe("useLedgerMutation", () => {
   test("a failure on one payload does not poison the key for a DIFFERENT payload", async () => {
     const qc = new QueryClient();
     const wrapper = ({ children }: { children: ReactNode }) => (
-      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
         {children}
       </LedgerProvider>
     );

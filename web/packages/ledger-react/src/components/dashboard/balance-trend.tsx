@@ -1,5 +1,8 @@
 "use client";
 
+import { useState } from "react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { Label } from "../ui/label";
 import { useSystemBalances } from "../../hooks/use-system";
 import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { formatAmount } from "../../lib/utils";
@@ -20,7 +23,10 @@ export function BalanceTrend() {
   const { data, isLoading, isError, refetch } = useSystemBalances();
   const { classCode, currencyCode } = useUidCodeLookups();
 
-  const chartData = (data ?? []).map((b) => ({
+  const [selectedCurrency, setSelectedCurrency] = useState("");
+  const currencyUids = [...new Set((data ?? []).map((balance) => balance.currency_uid))];
+  const trendCurrency = currencyUids.includes(selectedCurrency) ? selectedCurrency : currencyUids[0];
+  const chartData = (data ?? []).filter((balance) => balance.currency_uid === trendCurrency).map((b) => ({
     label: `${classCode(b.classification_uid)} · ${currencyCode(b.currency_uid)}`,
     balance: parseFloat(b.total_balance), // chart geometry only — intentional lossy conversion
     balanceRaw: b.total_balance, // tooltip/axis formatter reads this, never `balance` (J-5)
@@ -32,7 +38,14 @@ export function BalanceTrend() {
         <CardTitle className="text-sm font-medium">System Balances</CardTitle>
         <TrendingUp className="h-4 w-4 text-muted-foreground" />
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        {currencyUids.length > 0 && <div className="grid gap-2">
+          <Label htmlFor="system-balance-currency">Currency (booked quantities)</Label>
+          <Select value={trendCurrency ?? ""} onValueChange={(value) => { if (value) setSelectedCurrency(value); }}>
+            <SelectTrigger id="system-balance-currency"><SelectValue>{trendCurrency ? currencyCode(trendCurrency) : undefined}</SelectValue></SelectTrigger>
+            <SelectContent>{currencyUids.map((uid) => <SelectItem key={uid} value={uid}>{currencyCode(uid)}</SelectItem>)}</SelectContent>
+          </Select>
+        </div>}
         {isLoading ? (
           <div className="h-[300px] animate-shimmer rounded" />
         ) : isError ? (
@@ -77,7 +90,7 @@ export function BalanceTrend() {
                 }}
                 formatter={(value, name, entry) => {
                   const payload = entry?.payload as { balanceRaw?: string } | undefined;
-                  return [formatAmount(payload?.balanceRaw ?? String(value)), name];
+                  return [`${payload?.balanceRaw ?? String(value)} ${trendCurrency ? currencyCode(trendCurrency) : ""}`, name];
                 }}
               />
               <Bar dataKey="balance" fill="var(--chart-1)" radius={[6, 6, 0, 0]} />

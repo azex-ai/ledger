@@ -1,7 +1,9 @@
 "use client";
 
+import { fiveSkeletonRows } from "../../lib/skeleton-slots";
+
 import { useJournals } from "../../hooks/use-journals";
-import { formatAmount, formatUTC } from "../../lib/utils";
+import { formatUTC } from "../../lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import {
   Table,
@@ -43,8 +45,8 @@ export function RecentJournals({
       <CardContent>
         {isLoading ? (
           <div className="space-y-2">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="h-8 animate-shimmer rounded" />
+            {fiveSkeletonRows.map((slot) => (
+              <div key={slot.id} className="h-8 animate-shimmer rounded" />
             ))}
           </div>
         ) : isError ? (
@@ -67,7 +69,6 @@ export function RecentJournals({
                 <TableHead className="w-16">ID</TableHead>
                 <TableHead>Idempotency Key</TableHead>
                 <TableHead>Source</TableHead>
-                <TableHead className="text-right">Amount</TableHead>
                 <TableHead className="text-right">Created</TableHead>
               </TableRow>
             </TableHeader>
@@ -88,7 +89,6 @@ export function RecentJournals({
                     </span>
                   </TableCell>
                   <TableCell className="text-muted-foreground">{j.source}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(j.total_debit)}</TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
                     {formatUTC(j.created_at)}
                   </TableCell>

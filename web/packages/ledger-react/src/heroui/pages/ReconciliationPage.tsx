@@ -1,12 +1,13 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useState } from "react";
-import { Button, Card, Input, Label, Table, TextField, toast } from "@heroui/react";
+import { Button, Card, Input, Label, Table, TextField, Select, ListBox, toast } from "@heroui/react";
 import { useReconcileAccount, useReconcileGlobal } from "../../hooks/use-system";
-import { useUidCodeLookups } from "../../hooks/use-metadata";
+import { useUidCodeLookups, useCurrencies } from "../../hooks/use-metadata";
 import { cn, formatAmount, formatSignedAmount, formatUTC } from "../../lib/utils";
 import { errorText } from "../../lib/error-message";
-import { PageHeader, StatusChip } from "../shared";
+import { PageHeader, StatusChip, ErrorState } from "../shared";
 
 export function ReconciliationPage() {
   // query-consumption-allow: mutation, not a query — the failure callback (below) surfaces it via toast.danger, not a read of the error flag (J-16).
@@ -14,6 +15,7 @@ export function ReconciliationPage() {
   // query-consumption-allow: same as globalMutation above.
   const accountMutation = useReconcileAccount();
   const { classCode, currencyCode } = useUidCodeLookups();
+  const { data: currencies, isLoading, isError, refetch } = useCurrencies();
   const [holder, setHolder] = useState("");
   const [currencyId, setCurrencyId] = useState("");
 
@@ -40,10 +42,10 @@ export function ReconciliationPage() {
   }
 
   function runAccountCheck() {
-    const h = parseInt(holder, 10);
+    const h = parseHolderInput(holder, "account");
     const c = currencyId.trim();
-    if (isNaN(h) || c === "") {
-      toast.danger("Enter both a holder and a currency to run the check.");
+    if (typeof h !== "number" || c === "") {
+      toast.danger(typeof h !== "number" ? h ?? "Holder is required" : "Currency is required");
       return;
     }
     accountMutation.mutate(
@@ -106,14 +108,17 @@ export function ReconciliationPage() {
                 <Label className="text-xs">Holder</Label>
                 <Input placeholder="1001" />
               </TextField>
-              <TextField className="w-28" value={currencyId} onChange={setCurrencyId}>
+              <Select aria-label="Currency" value={currencyId} onChange={(key) => setCurrencyId(String(key ?? ""))} isDisabled={isLoading || isError || !currencies?.length}>
                 <Label className="text-xs">Currency</Label>
-                <Input placeholder="1" />
-              </TextField>
+                <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+                <Select.Popover><ListBox>{currencies?.map((currency) => <ListBox.Item key={currency.uid} id={currency.uid} textValue={currency.code}>{currency.code}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
+              </Select>
               <Button isPending={accountMutation.isPending} onPress={runAccountCheck}>
                 {({ isPending }) => (isPending ? "Running…" : "Check")}
               </Button>
             </div>
+            {isError && <ErrorState message="Failed to load currencies" onRetry={refetch} />}
+            {!isLoading && !isError && !currencies?.length && <p className="text-xs text-muted">No currencies configured</p>}
             {accountResult ? (
               <div className="space-y-2 pt-2">
                 <div className="flex items-center gap-2">

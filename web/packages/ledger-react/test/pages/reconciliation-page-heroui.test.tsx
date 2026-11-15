@@ -1,9 +1,20 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { toast } from "@heroui/react";
 import { http, HttpResponse } from "msw";
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { ReconciliationPage } from "../../src/heroui/pages/ReconciliationPage";
-import { renderPage, server, BASE } from "./render-page";
+import { renderPage, server, BASE, getOk } from "./render-page";
+
+beforeEach(() => server.use(
+  getOk("/api/v1/classifications", []),
+  getOk("/api/v1/currencies", [{ uid: "cur-1", code: "USD", name: "US Dollar", exponent: 2, is_active: true }]),
+));
+
+async function selectCurrency() {
+  await waitFor(() => expect(screen.getByLabelText("Currency")).not.toBeDisabled());
+  fireEvent.click(screen.getByLabelText("Currency"));
+  fireEvent.click(await screen.findByRole("option", { name: "USD" }));
+}
 
 /**
  * M5 guard drift (2026-08-26 web audit): `ReconcileResult.details` is
@@ -31,7 +42,7 @@ describe("ReconciliationPage (heroui) — guards optional details (M5)", () => {
     renderPage(<ReconciliationPage />);
 
     fireEvent.change(screen.getByLabelText("Holder"), { target: { value: "1001" } });
-    fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "cur-1" } });
+    await selectCurrency();
     fireEvent.click(screen.getByRole("button", { name: "Check" }));
 
     await waitFor(() => expect(screen.getByText("Balanced")).toBeInTheDocument());
@@ -59,7 +70,7 @@ describe("ReconciliationPage (heroui) — unbalanced result never toasts success
     );
     renderPage(<ReconciliationPage />);
     fireEvent.click(screen.getByRole("button", { name: "Run Global Check" }));
-    await waitFor(() => expect(dangerSpy).toHaveBeenCalled());
+    await waitFor(() => expect(dangerSpy).toHaveBeenCalledWith(expect.stringContaining("gap: 3.2")));
     expect(successSpy).not.toHaveBeenCalled();
   });
 
@@ -77,9 +88,9 @@ describe("ReconciliationPage (heroui) — unbalanced result never toasts success
     );
     renderPage(<ReconciliationPage />);
     fireEvent.change(screen.getByLabelText("Holder"), { target: { value: "1001" } });
-    fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "cur-1" } });
+    await selectCurrency();
     fireEvent.click(screen.getByRole("button", { name: "Check" }));
-    await waitFor(() => expect(dangerSpy).toHaveBeenCalled());
+    await waitFor(() => expect(dangerSpy).toHaveBeenCalledWith(expect.stringContaining("gap: 1.5")));
     expect(successSpy).not.toHaveBeenCalled();
   });
 });

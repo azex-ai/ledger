@@ -1,0 +1,5 @@
+=== RUN   TestArchitectureReviewProbe_FrozenCrossCurrencyNetting
+    architecture_review_probe_test.go:42: PROBE REPRODUCED: frozen holder USD 100 -> 0, compensated by +100 PTS; USD-only control refused
+--- PASS: TestArchitectureReviewProbe_FrozenCrossCurrencyNetting (0.40s)
+PASS
+ok  	github.com/azex-ai/ledger/postgres	1.767s

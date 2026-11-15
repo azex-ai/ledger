@@ -75,6 +75,36 @@ export interface WalletTransaction {
   /** Non-empty when this row reverses that journal (refund marker). */
   reversal_of_uid: string;
   memo: string;
+  /**
+   * The conversions this row's amount came from — an exchange's rate, or each
+   * priced line of a metered charge ("10,000 INPUT_TOKEN at 0.002 = 20
+   * CREDITS"). Always an array; empty when the row recorded none. Facts only:
+   * the configuration version, rounding mode and unit exponents never reach
+   * this surface. `TransactionList` renders these through `describeQuote`
+   * and the `unitLabels` presenter map.
+   */
+  quotes: WalletTransactionQuote[];
+  /**
+   * True when the journal recorded quotes that are withheld from this holder:
+   * it also carries other holders' entries, and a quote does not say whose
+   * line it explains. `quotes` is then empty. `TransactionList` shows the
+   * neutral `quotesOmittedLabel` ("Breakdown unavailable") instead of
+   * implying no conversion happened.
+   */
+  quotes_omitted: boolean;
+}
+
+/** One applied conversion on a `WalletTransaction`. All numbers are decimal strings. */
+export interface WalletTransactionQuote {
+  /** Unit priced or sold — a currency code, or a measured unit with no wallet (e.g. `INPUT_TOKEN`). */
+  source_code: string;
+  /** How much of `source_code` went in. */
+  source_quantity: string;
+  /** `target_code` units per one `source_code` unit. */
+  rate: string;
+  target_code: string;
+  /** What came out, at the target currency's precision. */
+  target_amount: string;
 }
 
 export interface WalletHold {

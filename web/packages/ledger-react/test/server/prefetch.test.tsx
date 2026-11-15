@@ -67,7 +67,7 @@ describe("server prefetch round-trip", () => {
     await prefetchJournals(qc, client, 20);
 
     // Cache is populated under the SHARED key, in useInfiniteQuery shape.
-    const cached = qc.getQueryData(ledgerKeys.journals(20)) as
+    const cached = qc.getQueryData(ledgerKeys.journals(client.cacheScope, 20)) as
       | { pages: Array<{ list: Array<{ id: number }> }> }
       | undefined;
     expect(cached?.pages[0].list).toEqual([{ id: 1 }, { id: 2 }]);
@@ -88,7 +88,8 @@ describe("server prefetch round-trip", () => {
   test("prefetchBalances seeds cache; useBalances hits it with no extra fetch", async () => {
     let calls = 0;
     server.use(
-      http.get(`${BASE}/api/v1/balances/42`, () => {
+      http.get(`${BASE}/api/v1/balances/42`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get("currency_uid")).toBe("cur-1");
         calls += 1;
         return HttpResponse.json({
           code: 200,
@@ -101,14 +102,14 @@ describe("server prefetch round-trip", () => {
     const client = createServerLedgerClient({ baseUrl: BASE });
     const qc = freshClient();
 
-    await prefetchBalances(qc, client, 42);
+    await prefetchBalances(qc, client, 42, "cur-1");
 
-    expect(qc.getQueryData(ledgerKeys.balances(42))).toEqual([
+    expect(qc.getQueryData(ledgerKeys.balances(client.cacheScope, 42, "cur-1"))).toEqual([
       { currency_uid: 1, balance: "100" },
     ]);
     expect(calls).toBe(1);
 
-    const { result } = renderHook(() => useBalances(42), {
+    const { result } = renderHook(() => useBalances(42, "cur-1"), {
       wrapper: wrapper(qc, client),
     });
     expect(result.current.isSuccess).toBe(true);
@@ -136,7 +137,7 @@ describe("server prefetch round-trip", () => {
 
     await prefetchSystemHealth(qc, client);
 
-    expect(qc.getQueryData(ledgerKeys.health())).toEqual({ status: "healthy" });
+    expect(qc.getQueryData(ledgerKeys.health(client.cacheScope))).toEqual({ status: "healthy" });
     expect(calls).toBe(1);
 
     const { result } = renderHook(() => useHealth(), {

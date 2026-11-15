@@ -73,12 +73,18 @@ function CreateDialog() {
           </div>
           <div className="grid gap-2">
             <Label htmlFor="cur-exponent">Decimal places (0-18)</Label>
-            <Input id="cur-exponent" type="number" min={0} max={18} step={1} value={form.exponent} onChange={(e) => setForm({ ...form, exponent: e.target.value })} placeholder="e.g. 2 for USD, 0 for JPY, 18 for wei" />
-            {fieldErrors.exponent && <p className="text-xs text-destructive">{fieldErrors.exponent}</p>}
+            <Input id="cur-exponent" type="number" min={0} max={18} step={1} value={form.exponent} aria-invalid={fieldErrors.exponent ? true : undefined} aria-describedby={fieldErrors.exponent ? "cur-exponent-error" : undefined} onChange={(e) => { setForm({ ...form, exponent: e.target.value }); setFieldErrors(({ exponent: _exponent, ...rest }) => rest); }} placeholder="e.g. 2 for USD, 0 for JPY, 18 for wei" />
+            {fieldErrors.exponent && <p id="cur-exponent-error" className="text-xs text-destructive">{fieldErrors.exponent}</p>}
           </div>
         </div>
         <DialogFooter>
-          <Button onClick={() => mutation.mutate({ code: form.code, name: form.name, exponent: Number(form.exponent) }, {
+          <Button onClick={() => {
+            const exponent = Number(form.exponent);
+            if (form.exponent.trim() === "" || !Number.isInteger(exponent) || exponent < 0 || exponent > 18) {
+              setFieldErrors({ ...fieldErrors, exponent: "Enter a whole number from 0 to 18." });
+              return;
+            }
+            mutation.mutate({ code: form.code, name: form.name, exponent }, {
             onSuccess: () => {
               toast.success("Currency created");
               setOpen(false);
@@ -91,7 +97,7 @@ function CreateDialog() {
                 toast.error(errorText(err, "Failed to create currency"));
               }
             },
-          })} disabled={mutation.isPending || !form.code || !form.name || form.exponent.trim() === "" || Number.isNaN(Number(form.exponent)) || Number(form.exponent) < 0 || Number(form.exponent) > 18}>
+          }); }} disabled={mutation.isPending || !form.code || !form.name}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
         </DialogFooter>
@@ -162,6 +168,7 @@ export function CurrenciesPage() {
               <TableHead className="w-[220px]">ID</TableHead>
               <TableHead>Code</TableHead>
               <TableHead>Name</TableHead>
+              <TableHead>Decimal places</TableHead>
               <TableHead>Active</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
@@ -174,6 +181,7 @@ export function CurrenciesPage() {
                 </TableCell>
                 <TableCell className="font-mono">{c.code}</TableCell>
                 <TableCell>{c.name}</TableCell>
+                <TableCell>{c.exponent}</TableCell>
                 <TableCell><StatusBadge status={c.is_active ? "active" : "inactive"} /></TableCell>
                 <TableCell>
                   {c.is_active && <DeactivateDialog id={c.uid} name={c.name} />}

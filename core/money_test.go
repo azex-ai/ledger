@@ -318,6 +318,12 @@ func FuzzAllocateFromStrings(f *testing.F) {
 	f.Add("1E999999999", "1", "1", int32(2))
 	f.Add("10E777777070", "1", "1", int32(2))
 	f.Add("1", "1E999999999", "1", int32(2))
+	// The target exponent is an independent input: a small amount alone
+	// must not make an unbounded rescale request acceptable.
+	f.Add("1", "1", "1", int32(36))
+	f.Add("1", "1", "1", int32(37))
+	f.Add("1", "1", "1", int32(1_000_000_000))
+	f.Add("1", "1", "1", int32(-1_000_000_000))
 
 	f.Fuzz(func(t *testing.T, totalStr, w1Str, w2Str string, exp int32) {
 		total, err := decimal.NewFromString(totalStr)
@@ -329,8 +335,10 @@ func FuzzAllocateFromStrings(f *testing.F) {
 		if err1 != nil || err2 != nil {
 			t.Skip("not a decimal")
 		}
-		if exp < 0 || exp > 18 {
-			t.Skip()
+		if exp < 0 || exp > MaxAmountWorkingFractionalDigits {
+			_, err := Allocate(total, []decimal.Decimal{w1, w2}, exp)
+			require.ErrorIs(t, err, ErrInvalidInput, "invalid target exponent must be rejected")
+			return
 		}
 
 		// The assertion is a TIME bound, not an outcome: Allocate is

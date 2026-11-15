@@ -52,6 +52,34 @@ func (s *stubHolderReader) ListHolderTransactions(_ context.Context, holder int6
 		CurrencyCode: "USD",
 		OccurredAt:   time.Date(2026, 7, 8, 2, 0, 0, 0, time.UTC),
 		Memo:         "top up",
+	}, {
+		UID:          "j-uid-2",
+		Kind:         "fee",
+		KindLabel:    "AI usage",
+		Direction:    core.HolderTransactionOut,
+		Amount:       decimal.RequireFromString("32.125"),
+		CurrencyUID:  "cur-uid-2",
+		CurrencyCode: "CREDITS",
+		OccurredAt:   time.Date(2026, 7, 8, 3, 0, 0, 0, time.UTC),
+		Quotes: []core.ConversionQuote{
+			{SourceCode: "INPUT_TOKEN", TargetCode: "CREDITS", TargetExponent: 6,
+				SourceQuantity: decimal.NewFromInt(10000), TargetAmount: decimal.NewFromInt(20),
+				Rate: decimal.RequireFromString("0.002"), Version: "price-v1", Rounding: core.RoundHalfUp},
+			{SourceCode: "OUTPUT_TOKEN", TargetCode: "CREDITS", TargetExponent: 6,
+				SourceQuantity: decimal.NewFromInt(2425), TargetAmount: decimal.RequireFromString("12.125"),
+				Rate: decimal.RequireFromString("0.005"), Version: "price-v1", Rounding: core.RoundHalfUp},
+		},
+	}, {
+		// A journal shared with another holder: its quotes are withheld.
+		UID:           "j-uid-3",
+		Kind:          "fee",
+		KindLabel:     "AI usage",
+		Direction:     core.HolderTransactionOut,
+		Amount:        decimal.NewFromInt(20),
+		CurrencyUID:   "cur-uid-2",
+		CurrencyCode:  "CREDITS",
+		OccurredAt:    time.Date(2026, 7, 8, 4, 0, 0, 0, time.UTC),
+		QuotesOmitted: true,
 	}}, "next-1", nil
 }
 
@@ -178,11 +206,42 @@ func TestHolderHandlerWireShape(t *testing.T) {
 	assert.Equal(t, "in", tx["direction"])
 	assert.Equal(t, "100", tx["amount"])
 	assert.Equal(t, "top up", tx["memo"])
+	// A row without a conversion carries an empty array, never null: the
+	// consumer's `quotes.length` must not have to guard against a missing key.
+	assert.Equal(t, []any{}, tx["quotes"])
+	// quotes_omitted is always on the wire, false when nothing was withheld.
+	assert.Equal(t, false, tx["quotes_omitted"])
 	// user-facing-surfaces guard: no double-entry vocabulary in the wire keys.
 	raw, _ := json.Marshal(tx)
 	for _, word := range []string{"debit", "credit", "entry_type", "classification", "journal_type_uid", "account_holder"} {
 		assert.NotContains(t, string(raw), word)
 	}
+
+	// A metered charge explains itself: two quotes, user-readable facts only.
+	charge := data["list"].([]any)[1].(map[string]any)
+	quotes := charge["quotes"].([]any)
+	require.Len(t, quotes, 2)
+	first := quotes[0].(map[string]any)
+	assert.Equal(t, "INPUT_TOKEN", first["source_code"])
+	assert.Equal(t, "10000", first["source_quantity"])
+	assert.Equal(t, "0.002", first["rate"])
+	assert.Equal(t, "CREDITS", first["target_code"])
+	assert.Equal(t, "20", first["target_amount"])
+	// Negative pin: configuration version, rounding mode and unit exponents
+	// are admin-surface audit detail (GET /journals metadata), not something
+	// the holder statement narrates (language-registers.md §3: wire carries
+	// facts, the presenter carries words).
+	rawCharge, _ := json.Marshal(charge)
+	for _, word := range []string{"version", "rounding", "exponent", "price-v1", "half_up"} {
+		assert.NotContains(t, string(rawCharge), word)
+	}
+	assert.Equal(t, false, charge["quotes_omitted"])
+
+	// A journal shared with another holder: an empty quotes array AND the
+	// trace that a breakdown existed but is withheld (2026-10-09 Major 2).
+	shared := data["list"].([]any)[2].(map[string]any)
+	assert.Equal(t, []any{}, shared["quotes"])
+	assert.Equal(t, true, shared["quotes_omitted"])
 
 	// Holds: empty list is a list, not null.
 	_, body = get(t, ts, "/api/v1/holder/holds", token)

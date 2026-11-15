@@ -3,6 +3,8 @@
 build:
 	go build ./...
 
+# Three fresh external hosts: root, chains/evm, anchors/r2. Candidate-source
+# replacements are explicit; see docs/CONSUMING.md for the release boundary.
 test-consumer:
 	bash scripts/test-consumer.sh
 
@@ -19,12 +21,13 @@ test-consumer:
 # this target printed `ok` for a package whose 100+ tests had not run.
 # postgrestest now fails instead of skipping, and this probe turns that
 # from a wall of failures deep in the run into one line before it starts.
-# DATABASE_URL is the documented way to run against a server you provide;
+# DATABASE_URL plus LEDGER_TEST_ISOLATED_DATABASE_URL on a dedicated second
+# cluster run the complete suite without Docker (see docs/TESTING.md);
 # make test-short is the documented way to run without one at all.
 test:
-	@if [ -z "$$DATABASE_URL" ] && ! docker info >/dev/null 2>&1; then \
+	@if { [ -z "$$DATABASE_URL" ] || [ -z "$$LEDGER_TEST_ISOLATED_DATABASE_URL" ]; } && ! docker info >/dev/null 2>&1; then \
 		echo "make test: the Docker daemon is not reachable, and the integration tests need PostgreSQL."; \
-		echo "  Start Docker, or set DATABASE_URL=postgres://... to use a server you provide,"; \
+		echo "  Start Docker, or set DATABASE_URL and LEDGER_TEST_ISOLATED_DATABASE_URL to two dedicated test clusters (docs/TESTING.md),"; \
 		echo "  or run 'make test-short' to skip every integration test (and know that you did)."; \
 		exit 1; \
 	fi

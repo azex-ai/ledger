@@ -1,3 +1,4 @@
+import { testCacheScope, testQueryScope } from "../cache-scope";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -11,7 +12,7 @@ const BASE = "http://ledger.test";
 
 function wrapperWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
       {children}
     </LedgerProvider>
   );
@@ -43,13 +44,13 @@ describe("use-deposits", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.pages.flatMap((p) => p.list)).toHaveLength(1);
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger", "classifications", true] }),
+      qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "classifications", true] }),
     ).toBeDefined();
     expect(
       qc.getQueryCache().find({
         queryKey: [
           "ledger",
-          "bookings",
+          testQueryScope, "bookings",
           "deposit",
           { ...params, classificationUid: "cls-3", limit: 20 },
         ],
@@ -91,7 +92,7 @@ describe("use-deposits", () => {
     result.current.mutate({ id: "uid-1", actual_amount: "10", channel_ref: "tx", idempotencyKey: "idem-1" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
-    expect(keys).toContainEqual(["ledger", "bookings"]);
-    expect(keys).toContainEqual(["ledger", "balances"]);
+    expect(keys).toContainEqual(["ledger", testQueryScope, "bookings"]);
+    expect(keys).toContainEqual(["ledger", testQueryScope, "balances"]);
   });
 });

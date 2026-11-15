@@ -1,0 +1,13 @@
+package main
+import("context";"fmt";"net/http/httptest";"strings";"time";"github.com/azex-ai/ledger/core";"github.com/azex-ai/ledger/server";"github.com/shopspring/decimal")
+type recorder struct{core.Reserver; got core.ReserveInput}
+func (r *recorder) Reserve(_ context.Context,in core.ReserveInput)(*core.Reservation,error){r.got=in;return &core.Reservation{UID:"test",ExpiresAt:time.Now().UTC()},nil}
+func main(){
+ input:=core.CreateBookingInput{ClassificationCode:"transfer",AccountHolder:9007199254740993,CurrencyUID:"018fffd9-0000-7000-8000-000000000001",Amount:decimal.NewFromInt(10),IdempotencyKey:"holder-domain-probe"}
+ if err:=input.Validate();err!=nil{panic(err)};fmt.Printf("core accepts holder=%d\n",input.AccountHolder)
+ r:=&recorder{}
+ srv,err:=server.NewFromDeps(&server.Config{Env:"dev",MaxBodyBytes:262144},server.Deps{Reserver:r});if err!=nil{panic(err)}
+ for _,payload:=range []string{`{"account_holder":42,"currency_uid":"018fffd9-0000-7000-8000-000000000001","amount":"10","idempotency_key":"library-review-expiry","expires_in":"1h"}`,`{"account_holder":42,"currency_uid":"018fffd9-0000-7000-8000-000000000001","amount":"10","idempotency_key":"library-review-expiry-control","expires_in_sec":3600}`} {
+ req:=httptest.NewRequest("POST","/api/v1/reservations",strings.NewReader(payload));w:=httptest.NewRecorder();srv.ServeHTTP(w,req);if w.Code!=201{panic(w.Body.String())};fmt.Printf("status=%d ReserveInput.ExpiresIn=%s\n",w.Code,r.got.ExpiresIn)
+ }
+}

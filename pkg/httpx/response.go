@@ -176,6 +176,11 @@ func resolveError(err error) *bizcode.AppError {
 		return bizcode.Wrap(18104, "authorization signer temporarily unavailable", err)
 	case errors.Is(err, core.ErrTransient):
 		return bizcode.Wrap(18105, "temporary failure", err)
+	// Stored data the library's own write path would have rejected: a
+	// server-side integrity failure (500), never the caller's 10001, and
+	// not retryable -- the same row fails the same way on every read.
+	case errors.Is(err, core.ErrCorruptData):
+		return bizcode.Wrap(19001, "stored data integrity violation", err)
 	default:
 		return bizcode.Wrap(19999, "internal error", err)
 	}

@@ -1,0 +1,13 @@
+package main
+
+import (
+	"github.com/azex-ai/ledger/chains/evm"
+	"github.com/azex-ai/ledger/core"
+)
+
+// Compile the host's port wiring without opening an RPC connection or signing.
+func adapters(clients *evm.ClientSet, signer core.Signer) (core.ChainReader, core.ChainScanner, core.Sweeper) {
+	return evm.NewReader(clients, 100), evm.NewScanner(clients, 2), evm.NewSweeper(clients, signer, "")
+}
+
+func main() {}

@@ -16,7 +16,10 @@ export function LedgerProvider({
   config: LedgerProviderConfig;
   children: ReactNode;
 }): React.JSX.Element {
-  const { baseUrl, apiKey, fetch } = config;
+  const { baseUrl, apiKey, fetch, cacheScope } = config;
+  const sharedScope = cacheScope !== undefined;
+  const backend = cacheScope?.backend;
+  const identity = cacheScope?.identity;
 
   // Build the client once per distinct config; memo keyed on the fields that
   // actually shape requests. Stable inputs → stable client identity (Phase 3
@@ -24,12 +27,17 @@ export function LedgerProvider({
   // inline arrow changes identity every render and rebuilds the client. See
   // LedgerClientConfig.fetch.
   const client = useMemo(
-    () => createLedgerClient({ baseUrl, apiKey, fetch }),
-    [baseUrl, apiKey, fetch],
+    () => createLedgerClient({
+      baseUrl, apiKey, fetch,
+      cacheScope: sharedScope ? { backend: backend ?? "", identity: identity ?? "" } : undefined,
+    }),
+    [baseUrl, apiKey, fetch, sharedScope, backend, identity],
   );
 
   return (
-    <LedgerClientContext.Provider value={client}>
+    // Reset local mutation/preview state at an identity boundary as well as
+    // changing query keys. An injected QueryClient can safely retain both scopes.
+    <LedgerClientContext.Provider key={JSON.stringify(client.cacheScope)} value={client}>
       <LedgerShell config={config}>{children}</LedgerShell>
     </LedgerClientContext.Provider>
   );

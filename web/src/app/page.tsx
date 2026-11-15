@@ -8,6 +8,7 @@ import {
 } from "@azex/ledger-react/server";
 import { NextLink } from "@/components/next-link";
 import { serverLedgerConfig } from "@/lib/ledger-env";
+import { getDashboardCacheScope } from "@/lib/ledger-cache-scope";
 
 // Admin dashboard is per-request data — never statically prerendered. This also
 // keeps `next build` from trying to reach the backend at build time.
@@ -17,7 +18,8 @@ export default async function Page() {
   const queryClient = new QueryClient();
   // Resolve config outside the try/catch — a misconfig must fail loudly, not be
   // swallowed as a "best-effort prefetch" failure.
-  const client = createServerLedgerClient(serverLedgerConfig());
+  const cacheScope = await getDashboardCacheScope();
+  const client = createServerLedgerClient({ ...serverLedgerConfig(), cacheScope });
 
   // Best-effort server prefetch. If the backend is unreachable, fall through
   // to client-side fetching rather than failing the render.

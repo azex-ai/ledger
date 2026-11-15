@@ -18,6 +18,13 @@ type accountPolicyDim struct {
 	classificationID int64
 }
 
+// accountPolicyCurrency keeps quantities in different currencies separate,
+// including when a holder-wide wildcard resolves them to the same policy.
+type accountPolicyCurrency struct {
+	policyID   int64
+	currencyID int64
+}
+
 // enforceAccountPolicies checks every entry in a not-yet-posted journal
 // against any account policy governing its dimension. Called from inside
 // postJournalWithQueries, after the tx-scoped advisory locks for the
@@ -35,9 +42,10 @@ type accountPolicyDim struct {
 //     combined effect must be judged once against balance-after, not
 //     rejected on an intermediate per-entry read.
 //
-//   - Per-policy net delta (policyDelta, keyed by the resolved policy row's
-//     ID) feeds the frozen check. A single policy row can be a currency- or
-//     holder-wide wildcard governing several classifications at once. E.g.
+//   - Per-policy, per-currency net delta (policyDelta, keyed by the resolved
+//     policy row's ID and entry currency ID) feeds the frozen check. A single
+//     policy row can be a currency- or holder-wide wildcard governing several
+//     classifications at once. E.g.
 //     PendingBalanceWriter.ConfirmPending posts, for the same holder in the
 //     same journal, a DR to the credit-normal "pending" classification (a
 //     decrease) and a DR to the debit-normal "main_wallet" classification (an
@@ -46,9 +54,9 @@ type accountPolicyDim struct {
 //     carve out deposits (design doc §4/§9-1: frozen blocks consumption, not
 //     the pending two-phase deposit flow — pinned by
 //     TestLedgerStore_ConfirmPending_SucceedsWhileFrozen). Netting by
-//     resolved policy row lets a same-policy journal's internal transfers
-//     wash out, while a genuine net withdrawal under that policy still nets
-//     negative and is rejected.
+//     resolved policy row and currency lets same-currency internal transfers
+//     wash out, while a net withdrawal in any currency under that policy is
+//     rejected. An increase in another currency cannot offset it.
 //
 // closed is absolute (blocks both directions per the design doc's semantics
 // table) so it is checked per-entry, fail-fast, with no netting.
@@ -57,7 +65,7 @@ type accountPolicyDim struct {
 func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Queries, entries []resolvedEntry) error {
 	policies := make(map[accountPolicyDim]*sqlcgen.AccountPolicy)
 	dimensionDelta := make(map[accountPolicyDim]decimal.Decimal)
-	policyDelta := make(map[int64]decimal.Decimal)
+	policyDelta := make(map[accountPolicyCurrency]decimal.Decimal)
 	policyByID := make(map[int64]*sqlcgen.AccountPolicy)
 
 	for _, e := range entries {
@@ -90,17 +98,18 @@ func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Que
 		}
 
 		if core.AccountPolicyStatus(policy.Status) == core.AccountPolicyStatusFrozen {
-			policyDelta[policy.ID] = policyDelta[policy.ID].Add(delta)
+			key := accountPolicyCurrency{policyID: policy.ID, currencyID: dim.currencyID}
+			policyDelta[key] = policyDelta[key].Add(delta)
 			policyByID[policy.ID] = policy
 		}
 	}
 
-	for policyID, netDelta := range policyDelta {
+	for key, netDelta := range policyDelta {
 		if netDelta.IsNegative() {
-			p := policyByID[policyID]
+			p := policyByID[key.policyID]
 			return fmt.Errorf(
 				"postgres: post journal: account %d currency %d is frozen — net decrease %s under policy %d: %w",
-				p.AccountHolder, p.CurrencyID, netDelta, policyID, core.ErrAccountFrozen,
+				p.AccountHolder, key.currencyID, netDelta, key.policyID, core.ErrAccountFrozen,
 			)
 		}
 	}

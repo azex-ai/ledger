@@ -100,11 +100,24 @@
 -- INHERIT, so the connecting role never silently carries ledger_owner's
 -- privileges.
 ------------------------------------------------------------------------------
+-- Roles are cluster-wide, and there is no CREATE ROLE IF NOT EXISTS. The
+-- existence check and the CREATE are two statements, so two databases in
+-- the same cluster migrating at once (CI runs every test package against
+-- one service container; a staging cluster may host several ledgers) can
+-- both pass the check and one of them then hits pg_authid's unique index.
+-- The loser must treat that as "the role exists", which is what it asked
+-- for -- not as a failed migration. Both SQLSTATEs are caught because the
+-- server reports the race as unique_violation (23505) and a lost race
+-- against CREATE ROLE's own catalog lock as duplicate_object (42710).
 SET LOCAL createrole_self_grant = 'set';
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledger_owner') THEN
-        CREATE ROLE ledger_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+        BEGIN
+            CREATE ROLE ledger_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+        EXCEPTION WHEN unique_violation OR duplicate_object THEN
+            NULL; -- a concurrent migration created it first
+        END;
     END IF;
 END $$;
 SET LOCAL createrole_self_grant = DEFAULT;
@@ -112,10 +125,18 @@ SET LOCAL createrole_self_grant = DEFAULT;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledger_app') THEN
-        CREATE ROLE ledger_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+        BEGIN
+            CREATE ROLE ledger_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+        EXCEPTION WHEN unique_violation OR duplicate_object THEN
+            NULL;
+        END;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledger_ro') THEN
-        CREATE ROLE ledger_ro LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+        BEGIN
+            CREATE ROLE ledger_ro LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+        EXCEPTION WHEN unique_violation OR duplicate_object THEN
+            NULL;
+        END;
     END IF;
 END $$;
 

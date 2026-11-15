@@ -25,7 +25,10 @@ func (s *LedgerStore) ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.
 	// EffectiveAt is only compared when the caller explicitly set it: a zero
 	// value on input means "defaulted to now() at insert time", which is
 	// necessarily different across retries and would falsely conflict.
-	effectiveAtMismatch := !input.EffectiveAt.IsZero() && !existing.EffectiveAt.Equal(input.EffectiveAt)
+	// pgx persists TIMESTAMPTZ at microsecond precision, flooring sub-microsecond
+	// digits just like the I-46 signature domain. Compare that same instant so
+	// an explicit nanosecond timestamp can replay after its storage roundtrip.
+	effectiveAtMismatch := !input.EffectiveAt.IsZero() && !existing.EffectiveAt.Equal(input.EffectiveAt.Truncate(time.Microsecond))
 
 	// The comparison happens in uid space: map the stored row's internal
 	// references back to uids so a retried uid-space payload compares 1:1.

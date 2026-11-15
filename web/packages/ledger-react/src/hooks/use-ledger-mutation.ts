@@ -4,6 +4,7 @@ import {
 } from "@tanstack/react-query";
 import { useRef } from "react";
 import { ledgerKeyPrefix } from "./keys";
+import { useLedgerClient } from "../provider/context";
 
 /**
  * A mutation function that also receives a per-attempt-sequence idempotency
@@ -65,10 +66,15 @@ export function useLedgerMutation<TData, TVariables>(
   keyOf: (variables: TVariables) => string = (variables) => JSON.stringify(variables),
 ) {
   const qc = useQueryClient();
+  const { cacheScope } = useLedgerClient();
   const keysRef = useRef(new Map<string, string>());
+  const scopedPayloadKey = (variables: TVariables) => JSON.stringify([cacheScope, keyOf(variables)]);
   return useMutation({
+    // A changed key detaches the observer from a pending old-scope mutation.
+    // Its original callbacks then keep invalidating only the original scope.
+    mutationKey: ledgerKeyPrefix.all(cacheScope),
     mutationFn: (variables: TVariables) => {
-      const payloadKey = keyOf(variables);
+      const payloadKey = scopedPayloadKey(variables);
       let idempotencyKey = keysRef.current.get(payloadKey);
       if (!idempotencyKey) {
         idempotencyKey = crypto.randomUUID();
@@ -80,14 +86,14 @@ export function useLedgerMutation<TData, TVariables>(
       // Ready for the next distinct action on THIS payload — a fresh click
       // after a success must not reuse a key an already-completed operation
       // owns. Other in-flight/failed payloads' keys are untouched.
-      keysRef.current.delete(keyOf(variables));
+      keysRef.current.delete(scopedPayloadKey(variables));
       for (const key of invalidateKeys) {
         // Namespace each caller-passed bare segment under the package root
         // prefix; no raw "ledger" literal lives here.
-        qc.invalidateQueries({ queryKey: [...ledgerKeyPrefix.all, key] });
+        qc.invalidateQueries({ queryKey: [...ledgerKeyPrefix.all(cacheScope), key] });
       }
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances });
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances(cacheScope) });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances(cacheScope) });
     },
     // onError intentionally does NOT delete the payload's key — a retried
     // .mutate() call with the SAME payload after a failure reuses it by

@@ -40,7 +40,7 @@ function useIdempotencyKey() {
 export function useClassifications(activeOnly?: boolean) {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.classifications(activeOnly),
+    queryKey: ledgerKeys.classifications(client.cacheScope, activeOnly),
     queryFn: () => client.listClassifications(activeOnly),
   });
 }
@@ -50,11 +50,12 @@ export function useCreateClassification() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (body: Parameters<LedgerClient["createClassification"]>[0]) =>
       client.createClassification(body, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications(client.cacheScope) });
     },
   });
 }
@@ -64,10 +65,11 @@ export function useDeactivateClassification() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (id: string) => client.deactivateClassification(id, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications(client.cacheScope) });
     },
   });
 }
@@ -77,7 +79,7 @@ export function useDeactivateClassification() {
 export function useJournalTypes(activeOnly?: boolean) {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.journalTypes(activeOnly),
+    queryKey: ledgerKeys.journalTypes(client.cacheScope, activeOnly),
     queryFn: () => client.listJournalTypes(activeOnly),
   });
 }
@@ -87,11 +89,12 @@ export function useCreateJournalType() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (body: Parameters<LedgerClient["createJournalType"]>[0]) =>
       client.createJournalType(body, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes(client.cacheScope) });
     },
   });
 }
@@ -101,10 +104,11 @@ export function useDeactivateJournalType() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (id: string) => client.deactivateJournalType(id, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes(client.cacheScope) });
     },
   });
 }
@@ -114,7 +118,7 @@ export function useDeactivateJournalType() {
 export function useTemplates(activeOnly?: boolean) {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.templates(activeOnly),
+    queryKey: ledgerKeys.templates(client.cacheScope, activeOnly),
     queryFn: () => client.listTemplates(activeOnly),
   });
 }
@@ -124,11 +128,12 @@ export function useCreateTemplate() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (body: Parameters<LedgerClient["createTemplate"]>[0]) =>
       client.createTemplate(body, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates(client.cacheScope) });
     },
   });
 }
@@ -138,10 +143,11 @@ export function useDeactivateTemplate() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (id: string) => client.deactivateTemplate(id, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates(client.cacheScope) });
     },
   });
 }
@@ -149,6 +155,7 @@ export function useDeactivateTemplate() {
 export function usePreviewTemplate() {
   const client = useLedgerClient();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: ({
       code,
       ...params
@@ -168,7 +175,7 @@ export function usePreviewTemplate() {
 export function useCurrencies(activeOnly?: boolean) {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.currencies(activeOnly),
+    queryKey: ledgerKeys.currencies(client.cacheScope, activeOnly),
     queryFn: () => client.listCurrencies(activeOnly),
   });
 }
@@ -178,11 +185,12 @@ export function useCreateCurrency() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (body: Parameters<LedgerClient["createCurrency"]>[0]) =>
       client.createCurrency(body, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies(client.cacheScope) });
     },
   });
 }
@@ -192,10 +200,11 @@ export function useDeactivateCurrency() {
   const qc = useQueryClient();
   const idempotency = useIdempotencyKey();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (id: string) => client.deactivateCurrency(id, idempotency.get()),
     onSuccess: () => {
       idempotency.clear();
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies(client.cacheScope) });
     },
   });
 }

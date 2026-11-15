@@ -373,7 +373,7 @@ export interface paths {
         put?: never;
         /**
          * Post the full reversal of an existing journal.
-         * @description Rejected (409) once the journal has any reversal history, full or partial — use reverse-partial to continue a partially-reversed journal.
+         * @description Rejected (409) once the journal already has reversal history, full or partial — use reverse-partial to continue a partially-reversed journal.
          *
          *     The idempotency key of a full reversal is derived server-side as `reversal:{uid}:{reason}`, so this endpoint takes none: supplying `idempotency_key` (in the body, or via the `Idempotency-Key` header, which the alias middleware folds into the body) is answered 400 rather than accepted and ignored, which is what an earlier revision of this spec advertised as `required` (H-M3). Callers that need to choose the key use reverse-partial with `num` == `den` == 1.
          */
@@ -3145,6 +3145,25 @@ export interface components {
             reversal_of_uid: string;
             /** @description journal.metadata["memo"] — host-written user-readable copy; empty when absent. */
             memo: string;
+            /** @description The conversions this row's amount came from (journal.metadata["conversion_quotes"], decoded): an exchange's rate, or each priced line of a metered charge ("10,000 INPUT_TOKEN at 0.002 = 20 CREDITS"). Always an array; empty when the journal recorded none. Only user-explainable facts travel here — the configuration version, rounding mode and unit exponents are audit detail on the admin journal surface, not on the holder statement. Quotes are journal-level and name no holder, so they are shown only when every user-side entry of the journal belongs to this holder; on a journal shared with other holders this is empty and quotes_omitted is true. */
+            quotes: components["schemas"]["HolderTransactionQuote"][];
+            /** @description True when the journal recorded conversion quotes that are withheld because it also carries other holders' entries (a quote does not say whose line it explains); quotes is then empty. Show a neutral "breakdown unavailable" note rather than implying no conversion happened. False otherwise, including when the journal recorded no quotes. */
+            quotes_omitted: boolean;
+        };
+        HolderTransactionQuote: {
+            /**
+             * @description Unit that was priced or sold. A currency code, or a measured unit that has no wallet.
+             * @example INPUT_TOKEN
+             */
+            source_code: string;
+            /** @description How much of source_code went in. */
+            source_quantity: components["schemas"]["Decimal"];
+            /** @description target_code units per one source_code unit. */
+            rate: components["schemas"]["Decimal"];
+            /** @example CREDITS */
+            target_code: string;
+            /** @description What came out, at the target currency's precision. */
+            target_amount: components["schemas"]["Decimal"];
         };
         HolderTransactionListEnvelope: components["schemas"]["Envelope"] & {
             data?: {

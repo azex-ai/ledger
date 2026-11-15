@@ -159,7 +159,10 @@ func TestFixedRate_PreservesQuoteWhenRoundedAmountsMatch(t *testing.T) {
 	secondJSON, err := json.Marshal(second)
 	require.NoError(t, err)
 	assert.NotEqual(t, string(firstJSON), string(secondJSON), "persist the quote, not only its rounded amount")
-	assert.JSONEq(t, `{"source_code":"USDC","target_code":"CREDITS","rate":"1.001","version":"price-v1","rounding":0}`, string(firstJSON))
+	// rounding travels by name (api-contract.md §7), never as the enum's
+	// integer position: a snapshot that said "0" would change meaning the day
+	// someone reorders the constants.
+	assert.JSONEq(t, `{"source_code":"USDC","target_code":"CREDITS","rate":"1.001","version":"price-v1","rounding":"half_up"}`, string(firstJSON))
 
 	var restored FixedRate
 	require.NoError(t, json.Unmarshal(firstJSON, &restored))

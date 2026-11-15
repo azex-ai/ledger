@@ -1,7 +1,7 @@
 # Ledger Cookbook
 
 Business recipes for modeling real product scenarios on top of the ledger's
-primitives — currencies, classifications, templates, and reserve/settle. Every
+primitives — currencies, classifications, templates, and reservations. Every
 recipe shows the T-accounts (double-entry) and a Go code skeleton against the
 `ledger` facade.
 
@@ -11,6 +11,11 @@ fixed-price, metered and incremental charges, plus zero-cost/failure release.
 See its [integration notes](../examples/credits-topup/README.md) for exact outcomes,
 retry rules and host responsibilities. Other recipes below describe optional
 modeling choices, not modules installed by this example.
+
+[configured-ledger](../examples/configured-ledger) demonstrates fee revenue,
+points issuance and gift conversion with concrete user/system balance assertions.
+Its negative cases show why a balanced journal can still encode the wrong
+economic effect. [valuation](../examples/valuation) is a separate USD read model.
 
 ---
 
@@ -86,12 +91,41 @@ fx_buy   (CREDITS, amount = 1000)
     CR system.settlement(CREDITS) 1000
 ```
 
-The host configures `core.FixedRate` for USDC → CREDITS, converts the source
-amount with the stored currencies' precision, supplies the complete quote snapshot
-as metadata, and derives stable `:reserve`,
-`:settle`, `:pay` and `:issue` keys from the persisted purchase ID. The
-[example's `exchangeCurrency`](../examples/credits-topup/main.go) is the executable
-composition. Both journals, the reservation and settlement roll back together.
+This composition is the library's `svc.Exchange`:
+
+```go
+rate, err := quoter.QuoteRate(ctx, "USDC", "CREDITS") // host's core.RateQuoter, outside any tx
+if err != nil {
+    return err
+}
+res, err := svc.Exchange(ctx, ledger.ExchangeInput{
+    HolderID: holder, SourceCurrencyUID: usdc, TargetCurrencyUID: credits,
+    Quantity: decimal.NewFromInt(1), Rate: rate,
+    IdempotencyKey: "purchase:" + depositBooking.UID, // one logical purchase per deposit
+    FundingUID:     depositBooking.JournalUID,        // the deposit journal that paid for it
+})
+```
+
+It resolves both stored currencies, quotes with `FixedRate.Quote`, reserves and
+settles the source (so account policies and balance floors apply exactly as to
+any spend), posts both legs, and derives the `:reserve` / `:settle` / `:pay` /
+`:issue` keys from the one key you give it. Both journals carry the applied
+`core.ConversionQuote` and the funding uid; everything commits or rolls back
+together. `FundingUID` is a *journal* uid -- the booking's `JournalUID`, not the
+booking uid -- and `Exchange` refuses (`core.ErrInvalidInput`) one that does
+not exist or has no entry for this holder in the source currency. It also
+checks what the two legs actually did: the sell leg must decrease the holder's
+available classifications by exactly `Quantity`; the buy leg must increase them
+by exactly the quoted amount. Every non-available user classification must have
+zero net change independently; pending, locked or memo amounts cannot offset
+one another or an incorrect available amount. Each leg is restricted to its own
+currency and the holder/system-counterpart pair. A misconfigured
+`SellTemplateCode` / `BuyTemplateCode` override is refused and rolled back.
+`FundingUID` establishes a journal reference, not exclusive use of that deposit
+or proof of a positive funding entry; host event uniqueness owns that policy.
+Call it on the `*Service` a `RunInTx` callback receives to commit your
+own "deposit converted" row in the same transaction. The
+[credits example](../examples/credits-topup/main.go) is the executable version.
 All competing purchases must use reservations too; a raw journal can bypass a
 hold. Configure a zero balance floor as an additional overdraft control.
 
@@ -103,13 +137,32 @@ These are operational ledger positions, not an automatic fiat revenue-recognitio
 or provider-cost system. Do not sum USDC and credits or call credits custodial
 onchain assets.
 
+This is an internal fixed-rate operation. It neither obtains a quantity-sensitive
+market quote nor executes an external swap. External submission, actual fill
+receipts and reconciliation belong to the host; a database rollback cannot undo
+an onchain fill. See the [market execution ADR](adr/2026-10-10-market-execution.md).
+
 ### Configure fixed rates for currencies, token usage and gifts
 
 `Currency` describes a unit and its precision. `FixedRate` describes a directed
 relation between two units: `target = source × rate`, rounded at the target
-exponent. It is a Go configuration value; it needs no price-feed service or new
-ledger subsystem. Keep rates off individual currencies, because a rate needs a
+exponent. It is a Go value; it needs no price-feed service or new ledger
+subsystem. Keep rates off individual currencies, because a rate needs a
 counter-currency and direction.
+
+**Where rates live is the host's decision, behind one port.** The ledger stores
+no rates. Implement `core.RateQuoter` — one method, `QuoteRate(ctx, source,
+target) (FixedRate, error)` — over whatever holds them: a JSON file (the
+credits example), a host table with effective dates, a price oracle for real
+currency pairs. `FixedRate.Version` carries whatever identifies the quote in
+that world (a configuration version, a feed id plus timestamp); the ledger does
+not distinguish configured from sourced rates. Resolve the quote outside any
+transaction and pass the value to `Exchange` or to your metered charge — nothing
+in the ledger calls the port, and nothing may (financial.md: no external call
+inside a transaction).
+
+"Complete a task, receive N tokens" is not a rate. It has no source unit; it is
+a grant template from the system counterpart with a host reason code.
 
 ```go
 inputToken := core.Currency{Code: "INPUT_TOKEN", Exponent: 0}
@@ -138,13 +191,21 @@ usage through this common path. Rates must be positive; zero measured quantity i
 valid, and a zero result needs release/no-journal handling. The wrapper rejects
 source overprecision, wrong pairs, invalid modes and out-of-storage-range amounts.
 
-Save source/target units and precision, original quantity, rate, version, rounding
-and result with each operation. Reuse that quote on retry after rates change;
-the example saves it on both FX legs and positive consumption journals, where
-metadata participates in idempotency comparison even if rounded amounts match.
-Zero-cost release has no journal metadata, so the host's durable event record
-must preserve its quote and operation kind. Configuration/version selection and
-provider event delivery remain host responsibilities.
+Save the applied quote with each operation: `FixedRate.Quote` returns a
+`core.ConversionQuote` (units and precision, original quantity, rate, version,
+rounding, result) and `core.EncodeConversionQuotes` renders a list of them for
+the `conversion_quotes` metadata key. `Exchange` does this for both FX legs;
+a metered charge does it for each priced line. Reuse that quote on retry after
+rates change — metadata participates in idempotency comparison even when the
+rounded amounts match. `JournalInput.Validate` rejects a value under that key
+that does not decode, or whose `target_amount` is not its own quantity × rate
+rounded at its target exponent (build quotes with `FixedRate.Quote`, one per
+priced line, and this always holds), and the holder statement (`GET /holder/transactions`)
+returns the decoded quotes as `quotes` so the wallet can show "10,000 input
+tokens × 0.002". Zero-cost release has no journal metadata, so the host's
+durable event record must preserve its quote and operation kind. Which
+configuration version is active and provider event delivery remain host
+responsibilities.
 
 ---
 
@@ -249,78 +310,99 @@ corrupt USDC. This isolation is why "just add a currency" is safe.
 
 ---
 
-## Recipe 4 — Spending credits: reserve → settle
+## Recipe 4 — Spending credits: reserve → Capture
 
 **Scenario:** a job may cost up to N credits; you hold a budget, run the job,
 then capture the actual cost and release the remainder. This is the safe pattern
 for metered consumption (an AI generation run, an API call quota, etc.).
 
-`available = balance − remaining holds of active/settling reservations`. `Reserve` takes a per-(holder,
-currency) advisory lock and checks availability (TOCTOU-safe). `Settle` closes
-the hold at the actual amount and **auto-releases the unused remainder back
-into `available`** — both of those are reservation bookkeeping, atomic within
-the reservation row. Neither writes a journal entry: **`Settle` moves no
-money.** If the spend needs to hit the books, that is a separate journal you
-post yourself (next block).
+`GetBalanceBreakdown.available` is the available-classification book balance
+minus remaining active/settling holds. `Reserve` checks availability under the
+per-holder/currency lock. `Settle` only updates the reservation and releases its
+unused remainder: **Settle alone does not debit a wallet**. Use the Go-only
+`svc.Capture` facade to atomically settle and post the charge. There is no Capture
+REST endpoint or React client method; a host handler supplies authorization and
+resolves its submitted job's reservation.
 
 ```go
-// hold up to 50 credits
+// Persist jobID and usageEventID in the host; retries reuse their original data.
 rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
     AccountHolder: userID, CurrencyUID: creditsUID,
     Amount:        decimal.RequireFromString("50"),
-    IdempotencyKey: ledger.NewIdempotencyKey("run-budget"),
+    IdempotencyKey: "budget:" + jobID,
     ExpiresIn:      time.Hour,
 })
-
-// run finishes; actual cost was 32 credits → 18 released back into available.
-// The debit journal below is what actually charges the user -- Settle alone
-// would close the hold and charge nobody (examples/billing used to make
-// exactly this mistake; see its history if you want the full account).
-// Settle and the journal run in one RunInTx: a crash between them would
-// otherwise release the hold without the charge landing, and the ledger
-// would report success because from its side nothing failed.
-// Create these once per logical usage event and persist/reuse on retries.
-settleKey := ledger.NewIdempotencyKey("run-settle")
-spendKey := ledger.NewIdempotencyKey("run-spend")
-err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
-    if err := tx.Reserver().Settle(ctx, core.SettleInput{
-        ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32"),
-        IdempotencyKey: settleKey,
-    }); err != nil {
-        return err
-    }
-    _, err := tx.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
-        HolderID: userID, CurrencyUID: creditsUID,
-        IdempotencyKey: spendKey,
-        Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("32")},
-    })
+if err != nil {
     return err
+}
+
+// External work completes outside a database transaction; its durable result
+// says 32 credits. Do not rerun the provider just because posting is retried.
+charge, err := svc.Capture(ctx, ledger.CaptureInput{
+    ReservationUID: rsv.UID,
+    Amount: decimal.RequireFromString("32"),
+    TemplateCode: "credits_spend", // install the example's available-only template
+    IdempotencyKey: "usage:" + usageEventID,
+    Metadata: map[string]string{"usage_event_id": usageEventID},
 })
+if err != nil {
+    return err
+}
+// Publish charge.JournalUID only after this call succeeds.
+_ = charge
 ```
 
-- Reserve does **not** move the balance — it's a soft lock reducing *available*.
-  `Settle` does not move it either. Post the actual debit journal (credits
-  leaving debit-normal `main_wallet` via a credit entry, with a matching debit
-  to `settlement`, as the example's `credits_spend` template defines) in the same
-  `RunInTx` as the `Settle` call — see `examples/credits-topup` for the
-  runnable version of the block above.
-- `ExecuteTemplate` called directly inside `RunInTx` (as above) always posts
-  `auth_status=unsigned_tx_mode` — there is no point inside an already-open
-  transaction where calling out to a configured `Attestor` would not itself
-  be the "external call inside a DB transaction" `financial.md` forbids. If
-  this service was constructed `WithAttestor` and something downstream calls
-  `RequireVerifiedBalance` on this dimension, that gate refuses to pay it
-  out. The fix is `svc.AuthorizeTemplate` **before** `RunInTx` opens, then
-  `tx.JournalWriter().PostAuthorized(...)` inside it instead of
-  `ExecuteTemplate` — see `examples/tamper-evident`'s appendix for a
-  runnable, asserted demonstration of both paths side by side.
-- To abandon a hold explicitly (job never ran):
-  ```go
-  svc.Reserver().Release(ctx, core.ReleaseInput{
-      ReservationUID: rsv.UID,
-      IdempotencyKey: ledger.NewIdempotencyKey("run-abandon"),
-  })
-  ```
+Starting at a 100-credit book balance, the 50 hold leaves 50 spendable. Full
+Capture of 32 leaves book balance 68, hold 0 and spendable 68. Partial Capture
+of 32 instead leaves book balance 68, hold 18 and spendable 50. A positive
+stream increment uses `Partial: true` and a distinct stable usage-event ID;
+`FinalizeSettlement` closes the remaining hold when the stream ends. Zero usage
+uses `Release` with a stable key and no zero-amount journal.
+
+Capture derives `:settle` and `:charge` keys and owns metadata keys
+`reservation_uid`, `capture_mode`, `capture_template_code`; do not supply them.
+Its template takes `amount` and must decrease only this holder/currency's
+available classifications by exactly that amount. Unlike Exchange's zero-net
+allowance, Capture rejects any user non-available entry, even memo. A four-line
+`fee_charge` therefore needs explicit host composition, not this convenience API.
+Other users, currencies or system counterparts are refused.
+
+On the top-level Service, Capture opens a transaction. On a `RunInTx` clone it
+joins without a savepoint; propagate errors and acquire the complete lock union
+before composing other financial operations. Reuse the same full payload on
+retries. Changing `Partial` may fail first with `ErrInvalidTransition` rather
+than `ErrConflict`; neither is permission to assign a fresh key to the same
+submitted event. Reservations protect against other reservations, not raw
+journal debits: route competing spending through the reservation workflow.
+
+Ordinary Capture produces `auth_status=unsigned_tx_mode` journals and unsigned
+discharge claims even with `WithAttestor`. For signed journals, the
+[signed-capture example](../examples/signed-capture) composes `AuthorizeTemplate`
+and verification **outside** the transaction, then `PostAuthorized` and settlement
+inside it. Signing the journal does not sign the discharge: the verified reserve
+gate still counts the original reservation until expiry. A signed replay with
+all authorization material absent uses that example's conservative
+`VerifiedBalanceReader` history check; partial material is refused. This is not
+an exact single-journal signature lookup and may reject replay after later
+unsigned history. The ordinary and signed paths have different guarantees.
+
+The [credits example](../examples/credits-topup) runs the ordinary path. Its
+`credits-demo-v3-capture` keys represent new fixture events only in a fresh demo
+database; old v2 metadata is not silently rewritten or replayed under new IDs.
+The guard rejects old demo events before configuration/accounting writes, while
+bootstrap schema migrations still happen first. Production submitted events need
+their original handler or an explicit host migration/reconciliation policy.
+
+### USD display is a read model
+
+[examples/valuation](../examples/valuation) joins holdings and prices by Currency
+UID and preserves each original quantity. `valid`, `missing`, `stale` and
+`future` price statuses include source/time evidence where available.
+`subtotal_usd` sums only valued rows; `total_usd` is absent unless `complete` is
+true. Explicit zero price is valid and differs from missing price. Observation
+time must be within the host's inclusive `[asOf - maxAge, asOf]` window. This
+example rejects negative holdings; it is not a debt valuation API. No display
+price changes book quantities or grants redemption rights.
 
 ---
 
@@ -369,7 +451,8 @@ original's amounts/rounding).
 `Reserve` returns `core.ErrInsufficientBalance` when available funds do not
 cover the budget. Direct journal debits only have an overdraft floor when an
 account policy with `EnforceMinBalance` is configured; they do not respect
-reservation holds. Route all competing consumption through Reserve → Settle. Handle it explicitly — surface it to the caller;
+reservation holds. Route all competing consumption through Reserve → Capture
+or an equivalent atomic settlement/journal composition. Handle it explicitly — surface it to the caller;
 never swallow it into a default/zero.
 
 ```go

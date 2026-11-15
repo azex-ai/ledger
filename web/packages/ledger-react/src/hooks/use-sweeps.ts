@@ -27,7 +27,7 @@ export function useSweeps(params: { status?: string } = {}, limit = 20) {
   const classification = useClassificationIdByCode(SWEEP_CODE);
   const classificationUid = classification.uid;
   const query = useInfiniteQuery({
-    queryKey: ledgerKeys.bookings(SWEEP_CODE, { ...params, classificationUid, limit }),
+    queryKey: ledgerKeys.bookings(client.cacheScope, SWEEP_CODE, { ...params, classificationUid, limit }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listBookings({
         status: params.status,

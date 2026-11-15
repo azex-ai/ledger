@@ -1,5 +1,8 @@
 "use client";
 
+import { useUidCodeLookups } from "../../hooks/use-metadata";
+import { ExactAmount } from "../exact-amount";
+
 import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
 import {
@@ -12,7 +15,7 @@ import {
   useRetryWithdraw,
 } from "../../hooks/use-withdrawals";
 import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
-import { formatAmount, formatUTC } from "../../lib/utils";
+import { formatUTC } from "../../lib/utils";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -280,6 +283,7 @@ function RetryButton({ id }: { id: string }) {
 }
 
 export function WithdrawalsPage() {
+  const { currencyCode } = useUidCodeLookups();
   const [statusFilter, setStatusFilter] = useState<string>("");
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
@@ -329,6 +333,7 @@ export function WithdrawalsPage() {
               <TableRow>
                 <TableHead className="w-[220px]">ID</TableHead>
                 <TableHead>Holder</TableHead>
+                <TableHead>Currency</TableHead>
                 <TableHead>Channel</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
                 <TableHead>Status</TableHead>
@@ -344,8 +349,9 @@ export function WithdrawalsPage() {
                     <span className="block truncate font-mono text-xs" title={w.uid}>#{w.uid}</span>
                   </TableCell>
                   <TableCell>{w.account_holder}</TableCell>
+                  <TableCell title={w.currency_uid}>{currencyCode(w.currency_uid)}</TableCell>
                   <TableCell>{w.channel_name}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(w.amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums"><ExactAmount value={w.amount} currencyCode={currencyCode(w.currency_uid)} /></TableCell>
                   <TableCell><StatusBadge status={w.status} /></TableCell>
                   <TableCell className="font-mono text-xs max-w-[160px] truncate" title={w.channel_ref || undefined}>
                     {w.channel_ref || "—"}

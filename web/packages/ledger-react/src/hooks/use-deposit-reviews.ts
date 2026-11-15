@@ -5,7 +5,7 @@ import {
   type InfiniteData,
 } from "@tanstack/react-query";
 import { useLedgerClient } from "../provider/context";
-import type { Booking, PaginatedResponse } from "../client/types";
+import type { Booking, LedgerQueryScope, PaginatedResponse } from "../client/types";
 import { ledgerKeyPrefix, ledgerKeys } from "./keys";
 import { useKeyedIdempotencyKeys } from "./use-idempotency-key";
 
@@ -18,7 +18,7 @@ import { useKeyedIdempotencyKeys } from "./use-idempotency-key";
 export function useDepositReviews(limit = 20) {
   const client = useLedgerClient();
   return useInfiniteQuery({
-    queryKey: ledgerKeys.depositReviews(limit),
+    queryKey: ledgerKeys.depositReviews(client.cacheScope, limit),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listDepositReviews({ cursor: pageParam, limit }),
     initialPageParam: undefined as string | undefined,
@@ -38,13 +38,14 @@ type ReviewQueueData = InfiniteData<PaginatedResponse<Booking>>;
  */
 function optimisticallyRemoveFromQueue(
   qc: ReturnType<typeof useQueryClient>,
+  scope: LedgerQueryScope,
   uid: string,
 ) {
   const previous = qc.getQueriesData<ReviewQueueData>({
-    queryKey: ledgerKeyPrefix.depositReviews,
+    queryKey: ledgerKeyPrefix.depositReviews(scope),
   });
   qc.setQueriesData<ReviewQueueData>(
-    { queryKey: ledgerKeyPrefix.depositReviews },
+    { queryKey: ledgerKeyPrefix.depositReviews(scope) },
     (data) =>
       data && {
         ...data,
@@ -64,11 +65,11 @@ function rollback(
   for (const [key, data] of previous) qc.setQueryData(key, data);
 }
 
-function invalidateReviewQueue(qc: ReturnType<typeof useQueryClient>) {
-  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.depositReviews });
-  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.bookings });
-  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances });
-  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances });
+function invalidateReviewQueue(qc: ReturnType<typeof useQueryClient>, scope: LedgerQueryScope) {
+  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.depositReviews(scope) });
+  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.bookings(scope) });
+  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances(scope) });
+  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances(scope) });
 }
 
 // Both mutations below mint their own idempotency key by hand (rather than
@@ -92,10 +93,11 @@ export function useApproveDepositReview() {
   const qc = useQueryClient();
   const idempotency = useKeyedIdempotencyKeys();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: (uid: string) => client.approveDepositReview(uid, idempotency.keyFor(uid)),
     onMutate: async (uid) => {
-      await qc.cancelQueries({ queryKey: ledgerKeyPrefix.depositReviews });
-      return { previous: optimisticallyRemoveFromQueue(qc, uid) };
+      await qc.cancelQueries({ queryKey: ledgerKeyPrefix.depositReviews(client.cacheScope) });
+      return { previous: optimisticallyRemoveFromQueue(qc, client.cacheScope, uid) };
     },
     onError: (_err, _uid, context) => {
       if (context) rollback(qc, context.previous);
@@ -103,7 +105,7 @@ export function useApproveDepositReview() {
     onSuccess: (_data, uid) => {
       idempotency.clear(uid);
     },
-    onSettled: () => invalidateReviewQueue(qc),
+    onSettled: () => invalidateReviewQueue(qc, client.cacheScope),
   });
 }
 
@@ -112,11 +114,12 @@ export function useRejectDepositReview() {
   const qc = useQueryClient();
   const idempotency = useKeyedIdempotencyKeys();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: ({ uid, reason }: { uid: string; reason: string }) =>
       client.rejectDepositReview(uid, reason, idempotency.keyFor(uid)),
     onMutate: async ({ uid }) => {
-      await qc.cancelQueries({ queryKey: ledgerKeyPrefix.depositReviews });
-      return { previous: optimisticallyRemoveFromQueue(qc, uid) };
+      await qc.cancelQueries({ queryKey: ledgerKeyPrefix.depositReviews(client.cacheScope) });
+      return { previous: optimisticallyRemoveFromQueue(qc, client.cacheScope, uid) };
     },
     onError: (_err, _vars, context) => {
       if (context) rollback(qc, context.previous);
@@ -124,6 +127,6 @@ export function useRejectDepositReview() {
     onSuccess: (_data, { uid }) => {
       idempotency.clear(uid);
     },
-    onSettled: () => invalidateReviewQueue(qc),
+    onSettled: () => invalidateReviewQueue(qc, client.cacheScope),
   });
 }

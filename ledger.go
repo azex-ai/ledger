@@ -375,6 +375,11 @@ func (s *Service) BalanceReader() core.BalanceReader { return s.ledgerStore }
 // Reserver implements reserve/settle/release.
 func (s *Service) Reserver() core.Reserver { return s.reserverStore }
 
+// ReservationReader reads a reservation by UID without locking it. On a
+// RunInTx clone it reads through that transaction; settlement remains responsible
+// for rechecking the current state, expiry and amount under its row lock.
+func (s *Service) ReservationReader() core.ReservationReader { return s.reserverStore }
+
 // Booker creates and transitions bookings.
 func (s *Service) Booker() core.Booker { return s.bookingStore }
 

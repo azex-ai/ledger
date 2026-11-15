@@ -1,0 +1,7 @@
+round exponent=2: exit=0 returned err=<nil> 
+convert exponent=2: exit=0 returned err=<nil> 
+allocate exponent=2: exit=0 returned err=<nil> 
+round exponent=1000000000: exceeded 0.8s; isolated process killed
+convert exponent=1000000000: exceeded 0.8s; isolated process killed
+allocate exponent=1000000000: exceeded 0.8s; isolated process killed
+round exponent=-1000000000: exceeded 0.8s; isolated process killed

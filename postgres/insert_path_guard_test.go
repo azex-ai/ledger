@@ -654,8 +654,16 @@ func TestRebalanceDefaultPartitionIsBoundedByData(t *testing.T) {
 
 	before := countPartitions(t, pool)
 
+	// Ask for exactly the four months 001 ships: the current month and the
+	// three after it. Computed, not written down -- a literal window was
+	// correct for the month the test was written and one partition short
+	// the month after.
 	var created []string
-	require.NoError(t, pool.QueryRow(ctx, `SELECT ledger_rebalance_default_partition('2026-09-01', '2026-12-01')`).Scan(&created))
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT ledger_rebalance_default_partition(
+			date_trunc('month', now())::date,
+			(date_trunc('month', now()) + interval '3 months')::date)
+	`).Scan(&created))
 
 	after := countPartitions(t, pool)
 	assert.LessOrEqual(t, after-before, 1,

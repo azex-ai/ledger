@@ -30,7 +30,7 @@ export function useClassificationIdByCode(code: string): ClassificationLookup {
   const client = useLedgerClient();
   const { data, isLoading, isError, refetch } = useQuery({
     // Shares the cache with useClassifications(true) — same key on purpose.
-    queryKey: ledgerKeys.classifications(true),
+    queryKey: ledgerKeys.classifications(client.cacheScope, true),
     queryFn: () => client.listClassifications(true),
     staleTime: 5 * 60_000,
   });

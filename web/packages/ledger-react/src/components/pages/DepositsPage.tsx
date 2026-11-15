@@ -1,8 +1,11 @@
 "use client";
 
+import { useUidCodeLookups } from "../../hooks/use-metadata";
+import { ExactAmount } from "../exact-amount";
+
 import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
-import { formatAmount, validateAmount } from "../../lib/utils";
+import { validateAmount } from "../../lib/utils";
 import {
   useDeposits,
   useConfirmingDeposit,
@@ -218,6 +221,7 @@ function FailDialog({ id }: { id: string }) {
 }
 
 export function DepositsPage() {
+  const { currencyCode } = useUidCodeLookups();
   const [statusFilter, setStatusFilter] = useState<string>("");
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
@@ -267,6 +271,7 @@ export function DepositsPage() {
               <TableRow>
                 <TableHead className="w-[220px]">ID</TableHead>
                 <TableHead>Holder</TableHead>
+                <TableHead>Currency</TableHead>
                 <TableHead>Channel</TableHead>
                 <TableHead className="text-right">Expected</TableHead>
                 <TableHead className="text-right">Actual</TableHead>
@@ -282,10 +287,11 @@ export function DepositsPage() {
                     <span className="block truncate font-mono text-xs" title={d.uid}>#{d.uid}</span>
                   </TableCell>
                   <TableCell>{d.account_holder}</TableCell>
+                  <TableCell title={d.currency_uid}>{currencyCode(d.currency_uid)}</TableCell>
                   <TableCell>{d.channel_name}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(d.amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums"><ExactAmount value={d.amount} currencyCode={currencyCode(d.currency_uid)} /></TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {d.settled_amount && d.settled_amount !== "0" ? formatAmount(d.settled_amount) : "—"}
+                    {d.settled_amount !== null && d.settled_amount !== undefined && d.settled_amount !== "" ? <ExactAmount value={d.settled_amount} currencyCode={currencyCode(d.currency_uid)} /> : "—"}
                   </TableCell>
                   <TableCell><StatusBadge status={d.status} /></TableCell>
                   <TableCell><DepositStepper status={d.status} /></TableCell>

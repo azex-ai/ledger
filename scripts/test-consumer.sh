@@ -1,75 +1,66 @@
 #!/usr/bin/env bash
-# Build the root library from a fresh host module, outside this go.work.
+# Candidate-source checks, not proof that any module version is published.
 set -euo pipefail
+IFS=$'\n\t'
 
-repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 consumer_dir=$(mktemp -d "${TMPDIR:-/tmp}/ledger-consumer.XXXXXX")
-trap 'rm -rf "$consumer_dir"' EXIT
+trap 'rm -rf -- "$consumer_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+consumer_dir=$(CDPATH= cd -- "$consumer_dir" && pwd -P)
+case "$consumer_dir" in
+  "$repo_dir"|"$repo_dir"/*)
+    echo "Consumer hosts must be outside the repository; set TMPDIR accordingly." >&2
+    exit 1
+    ;;
+esac
 export GOWORK=off
 go_version=$(cd "$repo_dir" && go list -m -f '{{.GoVersion}}')
-cd "$consumer_dir"
-go mod init ledger-consumer-check
-go mod edit "-go=$go_version"
-go mod edit -require=github.com/azex-ai/ledger@v0.0.0
-go mod edit "-replace=github.com/azex-ai/ledger=$repo_dir"
+module=github.com/azex-ai/ledger
 
-cat > main.go <<'GO'
-package main
-
-import (
-    "context"
-    "errors"
-    "github.com/azex-ai/ledger"
-    "github.com/azex-ai/ledger/core"
-    "github.com/azex-ai/ledger/presets"
-    "github.com/jackc/pgx/v5/pgxpool"
-    "github.com/shopspring/decimal"
-)
-
-func configure(ctx context.Context, pool *pgxpool.Pool) error {
-    svc, err := ledger.New(pool)
-    if err != nil { return err }
-    var _ core.TemplateBatchExecutor = svc.TemplateBatchExecutor()
-    var _ core.Reserver = svc.Reserver()
-    _ = func(requests []core.TemplateExecutionRequest) error {
-        return svc.RunInTx(ctx, func(tx *ledger.Service) error {
-            return tx.LockForTemplates(ctx, requests, "host-request:reserve")
-        })
-    }
-    return presets.InstallTemplateBundle(ctx, svc.Classifications(), svc.JournalTypes(), svc.Templates(), presets.DepositBundle())
-}
-
-func main() {
-    _ = ledger.NewIdempotencyKey("host-request")
-    credits := core.Currency{Code: "CREDITS", Exponent: 6}
-    for _, tc := range []struct{ source, quantity, rate, want string; exponent int32 }{
-        {"USDC", "1", "1000", "1000", 6},
-        {"INPUT_TOKEN", "10000", "0.002", "20", 0},
-        {"ROSE", "3", "10", "30", 0},
-    } {
-        source := core.Currency{Code: tc.source, Exponent: tc.exponent}
-        rate := core.FixedRate{SourceCode: tc.source, TargetCode: credits.Code,
-            Rate: decimal.RequireFromString(tc.rate), Version: "host-v1", Rounding: core.RoundHalfUp}
-        amount, err := rate.Convert(decimal.RequireFromString(tc.quantity), source, credits)
-        if err != nil { panic(err) }
-        if !amount.Equal(decimal.RequireFromString(tc.want)) { panic("incorrect configured conversion") }
-        if _, err := rate.Convert(decimal.NewFromInt(1), credits, source); !errors.Is(err, core.ErrInvalidInput) {
-            panic("reversed pair was accepted")
-        }
-    }
-}
-GO
-
-go mod tidy
-go build ./...
-go run -mod=readonly ./...
-go list -deps ./... > deps.txt
-while IFS= read -r dependency; do
-  case "$dependency" in
-    github.com/testcontainers/*|github.com/moby/*|github.com/docker/*)
-      echo "test-only dependency reached production imports: $dependency" >&2
-      exit 1
+# Each host owns a new go.mod/go.sum. No workspace or dependency go.mod
+# replacement can silently supply a sibling module to it.
+for consumer in root evm r2; do
+  mkdir "$consumer_dir/$consumer"
+  cd "$consumer_dir/$consumer"
+  echo "Consumer $consumer: GOWORK=off, fresh host at $PWD"
+  go mod init "example/ledger-consumer-$consumer"
+  go mod edit "-go=$go_version" "-require=$module@v0.0.0" "-replace=$module=$repo_dir"
+  case "$consumer" in
+    evm)
+      go mod edit "-require=$module/chains/evm@v0.0.0" "-replace=$module/chains/evm=$repo_dir/chains/evm"
+      ;;
+    r2)
+      go mod edit "-require=$module/anchors/r2@v0.0.0" "-replace=$module/anchors/r2=$repo_dir/anchors/r2"
+      # tidy loads dependency tests too. This is an explicit candidate-only
+      # replacement, never a production import or a claim of publishability.
+      go mod edit "-replace=$module/anchors/r2/internal/miniotest=$repo_dir/anchors/r2/internal/miniotest"
       ;;
   esac
-done < deps.txt
-echo "External consumer: tidy/build and configured conversions pass; production imports exclude Docker/testcontainers."
+  cp "$repo_dir/scripts/consumer-$consumer.go.txt" main.go
+  cat go.mod
+  go mod tidy
+  go build -mod=readonly ./...
+  go run -mod=readonly ./...
+  go list -mod=readonly -deps ./... > deps.txt
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      */internal/miniotest|*/internal/miniotest/*|*/internal/postgrestest|*/internal/postgrestest/*|github.com/testcontainers/*|github.com/moby/*|github.com/docker/*)
+        echo "Consumer $consumer: test-only dependency reached production imports: $dependency" >&2
+        exit 1
+        ;;
+    esac
+    # The root host must not pull optional adapters or their SDKs.
+    if [[ "$consumer" == root ]]; then
+      case "$dependency" in
+        "$module/chains/evm"|"$module/chains/evm"/*|"$module/anchors/r2"|"$module/anchors/r2"/*|github.com/ethereum/go-ethereum|github.com/ethereum/go-ethereum/*|github.com/aws/aws-sdk-go-v2|github.com/aws/aws-sdk-go-v2/*)
+          echo "Root consumer unexpectedly imports optional dependency: $dependency" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  done < deps.txt
+  echo "Consumer $consumer: tidy/build/run and production import checks passed."
+done
+echo "All three candidate consumers passed; remote release availability was not checked."
