@@ -291,6 +291,16 @@ func Clean(ctx context.Context, base string, log io.Writer) error {
 	}
 	defer conn.Close(context.WithoutCancel(ctx))
 
+	// errs collects per-object failures and progress-log write failures; a
+	// failed write is reported, never silently dropped, and never stops the
+	// cleanup itself.
+	var errs []error
+	logf := func(format string, args ...any) {
+		if _, err := fmt.Fprintf(log, format, args...); err != nil {
+			errs = append(errs, fmt.Errorf("pgtestenv: write log: %w", err))
+		}
+	}
+
 	for _, lock := range []struct {
 		key  int64
 		busy string
@@ -303,8 +313,8 @@ func Clean(ctx context.Context, base string, log io.Writer) error {
 			return fmt.Errorf("pgtestenv: try lock %d: %w", lock.key, err)
 		}
 		if !locked {
-			fmt.Fprintf(log, "pgtestclean: skipped, %s; its run cleans up (or run `make test-clean-db` later)\n", lock.busy)
-			return nil
+			logf("pgtestclean: skipped, %s; its run cleans up (or run `make test-clean-db` later)\n", lock.busy)
+			return errors.Join(errs...)
 		}
 		// Released when conn closes (deferred above) at the latest.
 		defer func(key int64) {
@@ -312,7 +322,6 @@ func Clean(ctx context.Context, base string, log io.Writer) error {
 		}(lock.key)
 	}
 
-	var errs []error
 	dbs, err := names(ctx, conn, `SELECT datname FROM pg_database WHERE datname LIKE 'ledger\_test\_%' ORDER BY 1`)
 	if err != nil {
 		return err
@@ -325,7 +334,7 @@ func Clean(ctx context.Context, base string, log io.Writer) error {
 			errs = append(errs, fmt.Errorf("drop leftover database %s: %w", db, err))
 			continue
 		}
-		fmt.Fprintf(log, "pgtestclean: dropped leftover database %s\n", db)
+		logf("pgtestclean: dropped leftover database %s\n", db)
 	}
 
 	roles, err := names(ctx, conn, `SELECT rolname FROM pg_roles WHERE rolname LIKE 'ledger\_%' ORDER BY 1`)
@@ -340,7 +349,7 @@ func Clean(ctx context.Context, base string, log io.Writer) error {
 			errs = append(errs, fmt.Errorf("drop leftover role %s: %w", role, err))
 			continue
 		}
-		fmt.Fprintf(log, "pgtestclean: dropped leftover role %s\n", role)
+		logf("pgtestclean: dropped leftover role %s\n", role)
 	}
 
 	for _, role := range DefaultRoleNames {
@@ -356,16 +365,16 @@ func Clean(ctx context.Context, base string, log io.Writer) error {
 			continue
 		}
 		if depended {
-			fmt.Fprintf(log, "pgtestclean: kept %s (objects in some database depend on it)\n", role)
+			logf("pgtestclean: kept %s (objects in some database depend on it)\n", role)
 			continue
 		}
 		if _, err := conn.Exec(ctx, "DROP ROLE "+pgx.Identifier{role}.Sanitize()); err != nil {
 			// DROP ROLE refuses on any dependency the query above missed --
 			// the safe outcome. Report it and keep going.
-			fmt.Fprintf(log, "pgtestclean: kept %s (%v)\n", role, err)
+			logf("pgtestclean: kept %s (%v)\n", role, err)
 			continue
 		}
-		fmt.Fprintf(log, "pgtestclean: dropped %s\n", role)
+		logf("pgtestclean: dropped %s\n", role)
 	}
 	return errors.Join(errs...)
 }
