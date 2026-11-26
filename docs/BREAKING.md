@@ -31,6 +31,10 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.0] — 2026-11-26
+
 ### All HTTP write routes: reserved `idempotency_key` prefixes
 
 Every HTTP write route (`POST` / `PUT` / `PATCH` / `DELETE`; webhook callbacks

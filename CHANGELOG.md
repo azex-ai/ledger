@@ -16,6 +16,80 @@ below note which artifact a change affects.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.0] — 2026-11-26
+
+Version-aligned: Go module `v0.7.0` and `@azex/ledger-react` 0.7.0. Breaking
+changes ship without compatibility shims; `docs/BREAKING.md`'s `[0.7.0]`
+section says, per symbol and endpoint, what a consumer must do.
+
+### Go module — Security (2026-11 audit, run 1)
+
+- **Reserved idempotency-key prefixes are refused on every non-webhook write
+  route.** A caller key starting with `deposit-`, `sweep-`, `webhook-`,
+  `expire-`, `pending:expire:` or `reversal:` — in the `Idempotency-Key`
+  header or the top-level `idempotency_key` body member — is answered
+  `400` / `10001` (field `idempotency_key`). Those are the namespaces the
+  ledger derives its own keys in; a caller holding one could make the
+  system's own write fail with `ErrConflict` for good. New:
+  `core.IsSystemIdempotencyKey` and the `core.IdempotencyPrefix*` constants.
+  Library calls are unchanged. **Breaking** for HTTP clients that use these
+  prefixes; RUNBOOK §15's manual recovery key is now
+  `recover-sweep-<uid>-<tx hash>`.
+- **Deposit identity metadata is normalized on write; invalid values are
+  refused.** Booking metadata carrying all three of `chain_id`, `tx_hash`,
+  `txlog_seq` is stored in one spelling (`core.NormalizeDepositIdentityMetadata`:
+  `tx_hash` lowercased, numbers canonical), on create and on every
+  transition, over HTTP and in the library. A `tx_hash` without `0x`/`0X` or
+  a non-numeric `chain_id` / `txlog_seq` is `ErrInvalidInput`. **Breaking**:
+  metadata reads back normalized; see RUNBOOK §13 "Before deploying" for
+  existing non-canonical rows.
+- **The `Idempotency-Key` alias keeps the body exact.** Members other than
+  `idempotency_key` are re-emitted byte-for-byte (an int64 above 2^53 no
+  longer turns into a neighbouring holder id), a `null` body is treated as
+  empty instead of panicking, and the body is decoded the way the handlers
+  decode it (first JSON value only), so trailing bytes cannot bypass the
+  reserved-prefix check.
+- **Deposit credit currency is bound to the corroborating token.** Before a
+  pending deposit is credited, the re-read log's token must resolve to the
+  booking's currency; otherwise the booking is parked for review
+  (`onchain_unverified`). The review gate now looks the token up lowercase,
+  like ingestion does.
+- **The verified balance sums exactly the entries it verified** (I-49). `V`
+  is now the sum of the rows the verification query returned, not a second
+  recompute, so a journal committed while the verifier runs can no longer
+  be counted unverified.
+
+### @azex/ledger-react
+
+- **Breaking:** cache keys are scope-first (`ledgerKeys(scope, …)`,
+  `LedgerClientConfig.cacheScope`); `getBalances` / `useBalances` / `prefetchBalances` require a
+  currency; `createBooking` / `transitionBooking` / reservation methods take
+  bodies derived from the generated OpenAPI types; `previewTemplate` takes
+  custom amounts in `amounts`; holder ids must be safe integers and
+  ambiguous holder input is refused in both skins;
+  `createClassification` requires `balance_role`. Entries in
+  `docs/BREAKING.md`.
+- **Added:** `./heroui/charts` entry point; display / decimal helpers on
+  `./headless`; wallet transaction quotes (`describeQuotes`, `unitLabels`,
+  `quotes_omitted` with `quotesOmittedLabel`); currency-aware wallet
+  actions and region / transaction customization in the shadcn wallet.
+- **Fixed:** silent failures replaced by explicit empty / error states;
+  server error text and field errors surfaced on mutations; idempotency keys
+  scoped per payload and per entity; missing `/deposit-reviews` and
+  `/sweeps` routes; decimal display; accessibility and overflow parity
+  between skins; the package's font tokens no longer override the host's
+  `font-sans` / `font-mono`.
+- **Changed:** `src/client/schema.ts` regenerated (`next_cursor` on every
+  list, `Booking.expires_at` nullable); peer `@heroui/react` raised to
+  `^3.2.4`; runtime dependencies bumped within their majors.
+- The dashboard app in `web/` (not part of the npm package) now requires
+  `LEDGER_CACHE_BACKEND_ID` in production and an exact same-origin `Origin`
+  on mutations.
+
+### Second-round audit remediation
+
 Second-round audit remediation (2026-09-02,
 [`docs/plans/2026-09-02-remediation-contracts.md`](docs/plans/2026-09-02-remediation-contracts.md)):
 six Critical findings, all merged to main (Wave 1); Major/Minor findings
@@ -1656,7 +1730,8 @@ between minor versions while under active development (see SemVer policy in
   `./styles.css`.
 - Published to the public npm registry.
 
-[Unreleased]: https://github.com/azex-ai/ledger/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/azex-ai/ledger/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/azex-ai/ledger/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/azex-ai/ledger/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/azex-ai/ledger/compare/v0.4.1...v0.5.1
 [0.4.1]: https://github.com/azex-ai/ledger/compare/v0.4.0...v0.4.1
