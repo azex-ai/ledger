@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -147,4 +148,89 @@ func TestIdempotencyMiddleware_NullBodyWithHeader(t *testing.T) {
 		assert.GreaterOrEqual(t, w.Code, 400, path)
 	}
 	assert.Equal(t, "k-1", got.IdempotencyKey, "the header key is injected into the null-turned-empty body")
+}
+
+// TestIdempotencyMiddleware_TrailingBytesDoNotBypassReservedKeyCheck pins the
+// parser agreement between the middleware and httpx.Decode. The handlers
+// decode with a json.Decoder that reads only the FIRST JSON value; the
+// middleware used json.Unmarshal, which rejects trailing data, so a body like
+// `{"idempotency_key":"deposit-confirmed-<victim>"} x` failed the middleware's
+// parse, passed through unchecked as "not a JSON object", and the handler
+// still decoded the reserved key from the first value.
+func TestIdempotencyMiddleware_TrailingBytesDoNotBypassReservedKeyCheck(t *testing.T) {
+	newSrv := func(reached *bool, gotKey *string) http.Handler {
+		return newTestServerWith(func(o *testServerOpts) {
+			o.booker = &mockBooker{
+				createFn: func(_ context.Context, in core.CreateBookingInput) (*core.Booking, error) {
+					*reached, *gotKey = true, in.IdempotencyKey
+					return &core.Booking{UID: "bk-1", Status: "pending", IdempotencyKey: in.IdempotencyKey}, nil
+				},
+				transitionFn: func(_ context.Context, in core.TransitionInput) (*core.Event, error) {
+					*reached, *gotKey = true, in.IdempotencyKey
+					return &core.Event{UID: "evt-1", BookingUID: in.BookingUID, ToStatus: in.ToStatus, OccurredAt: time.Now()}, nil
+				},
+			}
+			o.journals = &mockJournalWriter{postFn: func(_ context.Context, in core.JournalInput) (*core.Journal, error) {
+				*reached, *gotKey = true, in.IdempotencyKey
+				return &core.Journal{UID: "j-1", IdempotencyKey: in.IdempotencyKey}, nil
+			}}
+		})
+	}
+	// Each body is a JSON object with the key spliced in as its last member.
+	routes := []struct{ name, path, prefix string }{
+		{"create booking", "/api/v1/bookings",
+			`{"classification_code":"deposit","account_holder":1,"currency_uid":"cur-1","amount":"1","channel_name":"manual"`},
+		{"transition", "/api/v1/bookings/bk-own/transition", `{"to_status":"confirmed"`},
+		{"post journal", "/api/v1/journals",
+			`{"journal_type_uid":"jt-1","entries":[` +
+				`{"account_holder":1,"currency_uid":"cur-1","classification_uid":"cls-1","entry_type":"debit","amount":"5"},` +
+				`{"account_holder":-1,"currency_uid":"cur-1","classification_uid":"cls-1","entry_type":"credit","amount":"5"}]`},
+	}
+	trailers := []string{" x", "}", "{}", ` {"idempotency_key":"ok"}`}
+	send := func(srv http.Handler, path, body, header string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if header != "" {
+			req.Header.Set("Idempotency-Key", header)
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		return w
+	}
+
+	for _, rt := range routes {
+		for _, tr := range trailers {
+			t.Run(rt.name+"/reserved key refused/trailer "+strconv.Quote(tr), func(t *testing.T) {
+				reached, got := false, ""
+				w := send(newSrv(&reached, &got), rt.path,
+					rt.prefix+`,"idempotency_key":"deposit-confirmed-bk-victim"}`+tr, "")
+				require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+				env := decodeErrorEnvelope(t, w.Body.Bytes())
+				assert.Contains(t, env.Message.Fields["idempotency_key"], "reserved")
+				assert.False(t, reached, "a reserved key must be refused before reaching the store")
+			})
+
+			t.Run(rt.name+"/ordinary body key unchanged/trailer "+strconv.Quote(tr), func(t *testing.T) {
+				// No header: the original bytes reach the handler, which
+				// decodes the first value as it always did.
+				reached, got := false, ""
+				w := send(newSrv(&reached, &got), rt.path,
+					rt.prefix+`,"idempotency_key":"k-ordinary"}`+tr, "")
+				assert.Less(t, w.Code, 300, w.Body.String())
+				assert.True(t, reached)
+				assert.Equal(t, "k-ordinary", got)
+			})
+
+			t.Run(rt.name+"/header key injected, trailer dropped/trailer "+strconv.Quote(tr), func(t *testing.T) {
+				// Header present, body member absent: the rewrite re-emits
+				// the first value plus the key and drops the trailing bytes,
+				// which the handler's decoder never read anyway.
+				reached, got := false, ""
+				w := send(newSrv(&reached, &got), rt.path, rt.prefix+`}`+tr, "k-header")
+				assert.Less(t, w.Code, 300, w.Body.String())
+				assert.True(t, reached)
+				assert.Equal(t, "k-header", got)
+			})
+		}
+	}
 }

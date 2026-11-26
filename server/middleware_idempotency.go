@@ -83,11 +83,20 @@ func idempotencyHeaderAliasMiddleware(next http.Handler) http.Handler {
 		// double -- the request reached the handler naming a different
 		// holder than the client sent. Raw values are re-emitted unchanged;
 		// only the idempotency_key member is ever touched.
+		//
+		// Decoded exactly as httpx.Decode does -- a json.Decoder reading the
+		// FIRST JSON value only, trailing bytes unread -- not json.Unmarshal,
+		// which fails on anything after the value. With Unmarshal,
+		// `{"idempotency_key":"deposit-confirmed-<uid>"} x` failed here,
+		// passed through as "not a JSON object", and the handler's decoder
+		// still read the reserved key out of the first value. The member
+		// checked below must be the member the handler will see.
 		var m map[string]json.RawMessage
 		if len(bytes.TrimSpace(body)) == 0 {
 			m = map[string]json.RawMessage{}
-		} else if err := json.Unmarshal(body, &m); err != nil {
-			// Not a JSON object — let the handler produce its own decode error.
+		} else if err := json.NewDecoder(bytes.NewReader(body)).Decode(&m); err != nil {
+			// First value is not a JSON object (or not JSON at all) — let the
+			// handler produce its own decode error.
 			passThrough()
 			return
 		}
@@ -150,6 +159,10 @@ func idempotencyHeaderAliasMiddleware(next http.Handler) http.Handler {
 			target["idempotency_key"] = encodedKey
 		}
 
+		// The rewrite re-emits the first JSON value only; any bytes after it
+		// are dropped. The handler's decoder never reads past the first
+		// value either, so it decodes the same members it would have from
+		// the original body, plus the injected key.
 		rewritten, err := json.Marshal(m)
 		if err != nil {
 			httpx.Error(w, httpx.ErrBadRequest("invalid request body"))
