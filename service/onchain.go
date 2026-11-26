@@ -2755,6 +2755,23 @@ func (o *Onchain) corroborateBeforeConfirm(ctx context.Context, cache *blockCach
 		if strings.ToLower(s.Token) != wantToken {
 			return evidenceContradicted, fmt.Sprintf("the log at %s#%d is token %s, the booking claims %s", txHash, txLogSeq, strings.ToLower(s.Token), wantToken)
 		}
+		// The credit lands in b.CurrencyUID, so the token the chain moved
+		// must be the one configured for that currency -- the binding
+		// IngestDeposit applies when it builds a booking, re-applied here
+		// for bookings it did not build (POST /bookings, a Transition
+		// metadata merge). Without it a transfer of a cheap credit token
+		// corroborated a credit in any other currency. A token no longer in
+		// CreditTokens is left to reviewGate, which parks it.
+		if tc, configured := o.chains[chainID].CreditTokens[wantToken]; configured {
+			tokenCurrencyUID, err := o.currencies.resolve(ctx, o.deps.Currencies, tc.CurrencyCode)
+			if err != nil {
+				return evidenceUnavailable, fmt.Sprintf("resolve currency %s of token %s: %v", tc.CurrencyCode, wantToken, err)
+			}
+			if tokenCurrencyUID != b.CurrencyUID {
+				return evidenceContradicted, fmt.Sprintf("the log at %s#%d is token %s, configured as currency %s (%s), but the booking credits currency %s",
+					txHash, txLogSeq, wantToken, tc.CurrencyCode, tokenCurrencyUID, b.CurrencyUID)
+			}
+		}
 		if !s.Amount.Equal(b.Amount) {
 			return evidenceContradicted, fmt.Sprintf("the log at %s#%d moved %s, the booking claims %s", txHash, txLogSeq, s.Amount.String(), b.Amount.String())
 		}
