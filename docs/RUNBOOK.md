@@ -1861,6 +1861,46 @@ lag, wrong contract address, log-parsing bug) than the reconciliation
 control being wrong — investigate the primary source before touching
 `ReconcileCeiling`.
 
+### Before deploying the I-71 spelling normalization: list non-canonical deposit identities
+
+From this release, a booking whose metadata holds all three of `chain_id`,
+`tx_hash`, `txlog_seq` is stored in one spelling
+(`core.NormalizeDepositIdentityMetadata`), on create and on every
+transition's merged metadata. An existing non-canonical row is rewritten by
+its next transition (recheck, review, expiry, manual move): if the
+normalized identity is already held by another booking, that transition
+fails with `409` / `ErrConflict` on `uq_bookings_deposit_identity`; a row
+whose value is not an identity at all (no `0x` prefix, non-numeric)
+fails with `400`. **Before deploying**, run this read-only query:
+
+```sql
+SELECT uid, status, classification_id, created_at,
+       metadata->>'chain_id' AS chain_id, metadata->>'tx_hash' AS tx_hash,
+       metadata->>'txlog_seq' AS txlog_seq
+FROM bookings
+WHERE metadata ? 'chain_id' AND metadata ? 'tx_hash' AND metadata ? 'txlog_seq'
+  AND (left(metadata->>'tx_hash', 2) <> '0x'
+       OR metadata->>'tx_hash' <> lower(metadata->>'tx_hash')
+       OR NOT (CASE WHEN metadata->>'chain_id' ~ '^(0|-?[1-9][0-9]{0,18})$'
+                    THEN (metadata->>'chain_id')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
+                    ELSE false END)
+       OR NOT (CASE WHEN metadata->>'txlog_seq' ~ '^(0|-?[1-9][0-9]{0,18})$'
+                    THEN (metadata->>'txlog_seq')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
+                    ELSE false END));
+```
+
+A terminal row needs nothing (it is never transitioned again). A
+non-terminal row that is the only booking of its transfer needs nothing
+either: its next transition normalizes it. A non-terminal row that
+duplicates another booking's identity once normalized is a planted or
+accidental second spelling — transition it to `failed` while the old binary
+still runs (after the deploy that transition would itself collide). A row
+of a non-deposit classification that stores non-EVM ids under these keys
+must be finished or failed before the deploy, and its writer moved to other
+key names (docs/BREAKING.md). Deploy when no non-terminal row returned
+shares its normalized identity with another booking or holds an invalid
+value.
+
 ---
 
 ## 14. Onchain money-path metrics -- this library ships none of the alerting
@@ -2093,7 +2133,7 @@ conflict.
    ```
    POST /api/v1/bookings/{uid}/transition
    { "to_status": "sent", "channel_ref": "<recovered tx hash>",
-     "source": "onchain", "idempotency_key": "sweep-recover-<uid>-<tx hash>" }
+     "source": "onchain", "idempotency_key": "recover-sweep-<uid>-<tx hash>" }
    ```
    From there the ordinary loop takes over with no further manual steps: the
    next tick calls `TxIncluded` on that hash and either confirms the booking

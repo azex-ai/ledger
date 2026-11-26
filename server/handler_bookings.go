@@ -138,6 +138,9 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reserved system key namespaces (core.IsSystemIdempotencyKey) are
+	// refused for every write route in idempotencyHeaderAliasMiddleware.
+
 	amount, err := parseWireAmount(req.Amount, "amount")
 	if err != nil {
 		httpx.Error(w, err)

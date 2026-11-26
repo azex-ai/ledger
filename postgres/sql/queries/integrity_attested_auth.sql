@@ -63,9 +63,17 @@ ORDER BY journal_id, id;
 -- silently treated as authorized). Reuses idx_entries_account_id, the same
 -- index integrity_verified_balance.sql's ListContributingJournalIDs already
 -- relies on.
+--
+-- signed_amount is each entry's contribution to the balance (the same
+-- ledger_signed_amount RecomputeCheckpointFromEntries sums). The caller sums
+-- THESE rows -- the set it verified -- rather than recomputing in a later
+-- statement, whose fresh snapshot would also count an unsigned journal
+-- committed while the verifier ran (I-49).
 SELECT je.id AS entry_id, je.journal_id,
-       COALESCE(ea.auth_verdict, '') AS verdict
+       COALESCE(ea.auth_verdict, '') AS verdict,
+       ledger_signed_amount(c.normal_side, je.entry_type, je.amount) AS signed_amount
 FROM journal_entries je
+JOIN classifications c ON c.id = je.classification_id
 LEFT JOIN entry_attestations ea ON ea.entry_id = je.id
 WHERE je.account_holder = sqlc.arg(account_holder)::bigint
   AND je.currency_id = sqlc.arg(currency_id)::bigint

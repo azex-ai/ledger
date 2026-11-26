@@ -159,6 +159,19 @@ retries. System events derive a deterministic key from the source event.
 Replaying the **same key with the same payload** returns the original result;
 reusing it with a different payload returns HTTP `409` / code `10901`.
 
+**Reserved prefixes.** On every write route (`POST` / `PUT` / `PATCH` /
+`DELETE`, webhooks excepted) a caller-supplied key — in the `Idempotency-Key`
+header or the top-level `idempotency_key` body member — must not start with
+`deposit-`, `sweep-`, `webhook-`, `expire-`, `pending:expire:` or
+`reversal:`. Those namespaces hold keys the ledger derives itself from public
+or enumerable values (deposit ingest and confirmation, the sweep saga, webhook
+transitions, the expiration worker, the pending-timeout sweeper, full
+reversals — `core.IsSystemIdempotencyKey`). Keys are table-wide unique, so a caller-held
+key there (say `deposit-confirmed-<someone else's booking uid>` on a
+transition of your own booking) would make the system's own write conflict
+forever. Such a key is refused with `400` (`10001`, field `idempotency_key`).
+A random UUID never collides.
+
 Two exceptions, both explicit in `openapi.yaml` (`x-idempotency`) rather than
 left to be discovered:
 
@@ -246,6 +259,20 @@ Request:
 ```
 
 `expires_at` is optional (RFC 3339). `metadata` is a free-form JSON object.
+One exception: when it holds all three of `chain_id`, `tx_hash` and
+`txlog_seq` (an on-chain deposit identity, I-71), the three are stored in one
+spelling: a `0x`/`0X`-prefixed `tx_hash` is lowercased, and a base-10
+integer `chain_id` / `txlog_seq` is rewritten as its plain form (`01`, `+1` ->
+`1`). The booking returned (and the idempotency comparison of a retry) uses
+the normalized values. A `tx_hash` without the `0x`/`0X` prefix, or a
+non-numeric `chain_id` / `txlog_seq`, gets `400`. The same applies to
+the merged metadata of `POST /bookings/{uid}/transition`; a create or
+transition whose normalized identity is already held by another booking gets
+`409`.
+
+`idempotency_key` must not start with `deposit-`, `sweep-`, `webhook-`,
+`expire-`, `pending:expire:` or `reversal:` (reserved on every write route — see "Idempotency" above); such a
+key is refused with `400` (`10001`, field `idempotency_key`).
 
 Response `201 Created`:
 

@@ -5462,7 +5462,11 @@ the balance. Each figure is blind to exactly what the other sees:
 - A **forged, unsigned credit** committing in that same window raises E — E
   has no authorization check, by design, because it must not make an
   external call while holding the lock. Then `E > V` and the base is V, so
-  the forgery buys nothing.
+  the forgery buys nothing. That holds only because V is the sum of exactly
+  the entries it listed and verified, read in the same statement that
+  listed them. It used to be a separate recompute after verification, in a
+  fresh snapshot, so a forgery committed while the verifier ran was counted
+  in V without being verified, and the minimum included it.
 
 Taking the minimum is safe in both directions and needs no assumption about
 which kind of journal landed. It can refuse a reservation that a perfectly
@@ -5613,8 +5617,19 @@ The settle-side half is `postgres.ReserverStore.Settle` and
 `postgres.ReserverStore.FinalizeSettlement` deliberately do not call it.
 Migration `025` adds `idx_reservations_account_currency_expiry`, the only
 index that serves a lookup which must not mention `status`.
+V itself is `postgres.VerifiedBalanceStore.VerifiedBalance`, which sums the
+`signed_amount` of the rows the ListContributingEntryVerdicts query in
+`postgres/sql/queries/integrity_attested_auth.sql` returned — the set it
+verified — and runs no second balance query.
 
 **Pinned by**:
+- `postgres.TestVerifiedBalance_ForgeryInsideVerifyWindowIsNotCounted` and
+  `postgres.TestReserve_RequireVerifiedBalance_ForgeryInsideVerifyWindow` —
+  the window inside V: a verifier that pauses on its first call while a
+  balanced, unsigned journal of 5000 commits for the same holder. V must
+  stay 100, and a gated `Reserve` of 1000 must fail with
+  `core.ErrInsufficientBalance`. With the old recompute, V was 5100 and the
+  reservation went through.
 - `postgres.TestReserve_RequireVerifiedBalance_RejectsInflatedCheckpoint` —
   every journal genuinely signed, `balance_checkpoints` inflated by
   1,000,000 via direct SQL: a gated `Reserve` for 500,000 must fail with
@@ -7685,7 +7700,9 @@ what the chain said:
    `deposit_confirm` journal) from the recheck loop. Before crediting, the
    chain is re-read for the block the booking names and must produce a log
    carrying that booking's tx hash, log position, token, amount, and a
-   recipient registered to that booking's holder. A booking the chain does
+   recipient registered to that booking's holder; and the token, if it is
+   still in `CreditTokens`, must be configured for the booking's currency,
+   since that is the currency the credit lands in. A booking the chain does
    not corroborate is parked in `review` (reason `onchain_unverified`) after
    `WithConfirmationEvidenceMisses` consecutive contradictions — never
    credited, at any count. A booking still in `pending` is advanced one step
@@ -7753,6 +7770,10 @@ refusal is a queue an operator works (docs/RUNBOOK.md §13), not a log line.
   referencing a REAL transaction does not buy the amount of one's choosing:
   the log says 10, the booking claims 10000, and the booking is parked. This
   is the case a bare inclusion check cannot see.
+- `service.TestOnchain_Recheck_CreditCurrencyMustMatchCorroboratingToken` —
+  a booking created through `CreateBooking` names a real transfer of a cheap
+  configured token but credits USDC. It must be parked (`onchain_unverified`).
+  The same booking in the token's own currency must still be credited.
 - `service.TestOnchain_Recheck_CorroborationFailureIsNotAVerdict` — an
   `eth_getLogs` outage must neither credit a real deposit nor park it; the
   booking stays put and the tick reports the failure. When the chain can
@@ -7913,6 +7934,18 @@ booking may hold it. Two things enforce that, independently:
    a deployment that has not applied 032 yet, and it is the half that can
    say WHICH booking already has the log.
 
+Both halves compare the stored text, while the chain-side checks read
+`0xAB…`/`0Xab…` and `01`/`+1` as the same log. So there is one spelling:
+wherever booking metadata is written (create, and the merged result of every
+transition), a row carrying all three keys is stored with `tx_hash` in
+lowercase with a `0x` prefix, and `chain_id` and `txlog_seq` as base-10
+integers exactly as `strconv.FormatInt` prints them. A spelling of the same
+value (hash case, a `0X` prefix, `01`, `+1`) is normalized to that form
+before the idempotency comparison and the write, so it collides with the
+index like the canonical spelling would; a value that is not one (no `0x`
+prefix, a non-numeric integer field) is refused with
+`core.ErrInvalidInput`. `IngestDeposit` already writes this form.
+
 The honest writer is unaffected: `IngestDeposit` resolves a re-observed
 transfer to the booking that already exists before attempting any insert, so
 a re-scanned window, a redelivered webhook and a registration rescan all
@@ -7962,9 +7995,22 @@ one only the ledger can answer: **have I already counted this?**
 pre-credit corroboration reached through
 `service.Onchain.RunPendingRecheckOnce` and by
 `service.Onchain.IngestDeposit`, which uses it to say WHICH booking took a
-transfer it could not book.
+transfer it could not book. The single spelling is
+`core.NormalizeDepositIdentityMetadata`, applied by
+`postgres.BookingStore.CreateBooking` before its idempotency lookup and
+INSERT and by `postgres.BookingStore.Transition` on the merged metadata
+before the UPDATE; `core.CreateBookingInput.Validate` calls it for the
+refusal of invalid values.
 
 **Pinned by**:
+- `core.TestNormalizeDepositIdentityMetadata` and
+  `postgres.TestBookingStore_DepositIdentitySpelling` — hash case variants,
+  a `0X` prefix, and `01` / `+1` for `txlog_seq` and `chain_id` are stored
+  canonical on create and on a transition's metadata merge; a retry with the
+  same key and spelling returns the original booking; a different-key create
+  or a transition naming an already-held log in another spelling is
+  `ErrConflict`; a hash without the prefix and a
+  non-numeric `chain_id` / `txlog_seq` are refused.
 - `service.TestDepositIdentity_DuplicateBookingsAreRejectedAtInsert` — the
   reported attack statement refused, under both a channel name of the
   writer's choosing and the honest one, since the constraint is about the

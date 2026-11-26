@@ -635,6 +635,12 @@ core.HolderTxKindNone = const HolderTxKind
 core.HolderTxKindOther = const HolderTxKind
 core.HolderTxKindTransfer = const HolderTxKind
 core.HolderTxKindWithdrawal = const HolderTxKind
+core.IdempotencyPrefixDeposit = const = "deposit-"
+core.IdempotencyPrefixExpire = const = "expire-"
+core.IdempotencyPrefixPendingExpire = const = "pending:expire:"
+core.IdempotencyPrefixReversal = const = "reversal:"
+core.IdempotencyPrefixSweep = const = "sweep-"
+core.IdempotencyPrefixWebhook = const = "webhook-"
 core.InclusionProof = type struct
 core.InclusionProof.LeafIndex = field int64
 core.InclusionProof.Path = field [][]byte
@@ -652,6 +658,7 @@ core.IngestDeadLetter.UID = field string
 core.IsNopLogger = func(l Logger) bool
 core.IsRetryable = func(err error) bool
 core.IsSystemAccount = func(holder int64) bool
+core.IsSystemIdempotencyKey = func(key string) bool
 core.IsUserAccount = func(holder int64) bool
 core.Journal = type struct
 core.Journal.ActorID = field int64
@@ -858,6 +865,7 @@ core.NormalSide = type string
 core.NormalSide.IsValid = method () bool
 core.NormalSideCredit = const NormalSide
 core.NormalSideDebit = const NormalSide
+core.NormalizeDepositIdentityMetadata = func(md map[string]string) (map[string]string, error)
 core.Option = type func(*Engine)
 core.ParseRoundingMode = func(name string) (RoundingMode, error)
 core.PendingBalanceWriter = type interface
@@ -2890,6 +2898,7 @@ sqlcgen.ListContributingEntryVerdictsParams.CurrencyID = field int64
 sqlcgen.ListContributingEntryVerdictsRow = type struct
 sqlcgen.ListContributingEntryVerdictsRow.EntryID = field int64
 sqlcgen.ListContributingEntryVerdictsRow.JournalID = field int64
+sqlcgen.ListContributingEntryVerdictsRow.SignedAmount = field pgtype.Numeric
 sqlcgen.ListContributingEntryVerdictsRow.Verdict = field string
 sqlcgen.ListContributingJournalIDsParams = type struct
 sqlcgen.ListContributingJournalIDsParams.AccountHolder = field int64

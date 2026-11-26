@@ -1310,7 +1310,7 @@ func (o *Onchain) classifyIngestConflict(ctx context.Context, s core.DepositSigh
 }
 
 func depositIdempotencyKey(chainID int64, txHash string, txLogSeq int32) string {
-	return fmt.Sprintf("deposit-%d-%s-%d", chainID, txHash, txLogSeq)
+	return fmt.Sprintf(core.IdempotencyPrefixDeposit+"%d-%s-%d", chainID, txHash, txLogSeq)
 }
 
 // depositChannelRef qualifies a tx hash with its txlog_seq before using it as
@@ -1347,7 +1347,7 @@ func depositChannelRef(txHash string, txLogSeq int32) string {
 // (the second visit to a status resolving to the first visit's key) rather
 // than any error at all (F-m10).
 func depositTransitionKey(bookingUID string, toStatus core.Status) string {
-	return fmt.Sprintf("deposit-%s-%s", toStatus, bookingUID)
+	return fmt.Sprintf(core.IdempotencyPrefixDeposit+"%s-%s", toStatus, bookingUID)
 }
 
 // advanceConfirmation pushes booking through pending -> confirming ->
@@ -1394,7 +1394,7 @@ func (o *Onchain) advanceConfirmation(ctx context.Context, booking *core.Booking
 		// by the recheck loop, and the startup validation can only see
 		// tokens that are still configured. "Not configured" and "configured
 		// with no ceiling" must not be the same value.
-		tc, tokenConfigured := cfg.CreditTokens[booking.Metadata["token"]]
+		tc, tokenConfigured := cfg.CreditTokens[strings.ToLower(booking.Metadata["token"])]
 		reason, err := o.reviewGate(ctx, booking, tc, tokenConfigured)
 		if err != nil {
 			return nil, fmt.Errorf("advance to confirmed: review gate: %w", err)
@@ -1625,7 +1625,7 @@ func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core
 	authorized, err := o.deps.TxComposer.AuthorizeTemplate(ctx, depositConfirmTemplate, core.TemplateParams{
 		HolderID:       booking.AccountHolder,
 		CurrencyUID:    booking.CurrencyUID,
-		IdempotencyKey: "deposit-confirm-" + booking.UID,
+		IdempotencyKey: core.IdempotencyPrefixDeposit + "confirm-" + booking.UID,
 		Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
 		Source:         onchainSource,
 		Metadata:       journalMeta,
@@ -2755,6 +2755,23 @@ func (o *Onchain) corroborateBeforeConfirm(ctx context.Context, cache *blockCach
 		if strings.ToLower(s.Token) != wantToken {
 			return evidenceContradicted, fmt.Sprintf("the log at %s#%d is token %s, the booking claims %s", txHash, txLogSeq, strings.ToLower(s.Token), wantToken)
 		}
+		// The credit lands in b.CurrencyUID, so the token the chain moved
+		// must be the one configured for that currency -- the binding
+		// IngestDeposit applies when it builds a booking, re-applied here
+		// for bookings it did not build (POST /bookings, a Transition
+		// metadata merge). Without it a transfer of a cheap credit token
+		// corroborated a credit in any other currency. A token no longer in
+		// CreditTokens is left to reviewGate, which parks it.
+		if tc, configured := o.chains[chainID].CreditTokens[wantToken]; configured {
+			tokenCurrencyUID, err := o.currencies.resolve(ctx, o.deps.Currencies, tc.CurrencyCode)
+			if err != nil {
+				return evidenceUnavailable, fmt.Sprintf("resolve currency %s of token %s: %v", tc.CurrencyCode, wantToken, err)
+			}
+			if tokenCurrencyUID != b.CurrencyUID {
+				return evidenceContradicted, fmt.Sprintf("the log at %s#%d is token %s, configured as currency %s (%s), but the booking credits currency %s",
+					txHash, txLogSeq, wantToken, tc.CurrencyCode, tokenCurrencyUID, b.CurrencyUID)
+			}
+		}
 		if !s.Amount.Equal(b.Amount) {
 			return evidenceContradicted, fmt.Sprintf("the log at %s#%d moved %s, the booking claims %s", txHash, txLogSeq, s.Amount.String(), b.Amount.String())
 		}
@@ -3142,7 +3159,7 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 		return o.reviveFailedSweep(ctx, failed, nonce, eligible, policy)
 	}
 
-	idemKey := fmt.Sprintf("sweep-%d-%s-%d", policy.ChainID, policy.Token, nonce)
+	idemKey := fmt.Sprintf(core.IdempotencyPrefixSweep+"%d-%s-%d", policy.ChainID, policy.Token, nonce)
 	booking, err := o.deps.Booker.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: presets.SweepClassificationCode,
 		AccountHolder:      sweepSystemHolder(policy.ChainID),
@@ -3190,19 +3207,19 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 //     same reason: it identifies which failed cycle is being revived, so two
 //     distinct revivals (of two distinct failed cycles) never collide.
 func sweepSentKey(bookingUID, txHash string) string {
-	return fmt.Sprintf("sweep-sent-%s-%s", bookingUID, txHash)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"sent-%s-%s", bookingUID, txHash)
 }
 
 func sweepConfirmedKey(bookingUID, txHash string) string {
-	return fmt.Sprintf("sweep-confirmed-%s-%s", bookingUID, txHash)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"confirmed-%s-%s", bookingUID, txHash)
 }
 
 func sweepFailedKey(bookingUID, cycleChannelRef string) string {
-	return fmt.Sprintf("sweep-failed-%s-%s", bookingUID, cycleChannelRef)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"failed-%s-%s", bookingUID, cycleChannelRef)
 }
 
 func sweepReviveKey(failedBookingUID, failedCycleChannelRef string) string {
-	return fmt.Sprintf("sweep-revive-%s-%s", failedBookingUID, failedCycleChannelRef)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"revive-%s-%s", failedBookingUID, failedCycleChannelRef)
 }
 
 // reviveFailedSweep re-drives a sweep booking that exhausted its gas-bump

@@ -90,13 +90,13 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 			// finalized this one."
 			opErr = s.reservationFinalize.FinalizeSettlement(ctx, core.FinalizeSettlementInput{
 				ReservationUID: r.UID,
-				IdempotencyKey: "expire-finalize-" + r.UID,
+				IdempotencyKey: core.IdempotencyPrefixExpire + "finalize-" + r.UID,
 			})
 			opName = "finalize settlement"
 		} else {
 			opErr = s.reservationRelease.Release(ctx, core.ReleaseInput{
 				ReservationUID: r.UID,
-				IdempotencyKey: "expire-release-" + r.UID,
+				IdempotencyKey: core.IdempotencyPrefixExpire + "release-" + r.UID,
 			})
 			opName = "release reservation"
 		}
@@ -152,7 +152,7 @@ func (s *ExpirationService) ExpireStaleBookings(ctx context.Context, batchSize i
 		_, err := s.bookingTransit.Transition(ctx, core.TransitionInput{
 			BookingUID:     b.UID,
 			ToStatus:       "expired",
-			IdempotencyKey: "expire-booking-" + b.UID,
+			IdempotencyKey: core.IdempotencyPrefixExpire + "booking-" + b.UID,
 		})
 		if err != nil {
 			s.logger.Error("service: expiration: expire booking failed",

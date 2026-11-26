@@ -830,7 +830,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 	// here (not inside reverseJournalWithQueries) so the pool-mode branch
 	// below can pass the identical string into AuthorizeReversal before any
 	// transaction opens.
-	expectedKey := fmt.Sprintf("reversal:%s:%s", journalUID, reason)
+	expectedKey := fmt.Sprintf(core.IdempotencyPrefixReversal+"%s:%s", journalUID, reason)
 
 	if s.pool == nil {
 		return s.reverseJournalWithQueries(ctx, s.q, journalUID, reason, expectedKey, nil, journalAuth{status: core.AuthStatusUnsignedTxMode})

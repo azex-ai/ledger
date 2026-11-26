@@ -47,12 +47,11 @@ var _ core.VerifiedBalanceReader = (*VerifiedBalanceStore)(nil)
 // the single path that cannot afford it.
 type VerifiedBalanceStore struct {
 	// pool is non-nil only in pool mode; nil signals tx mode.
-	pool      *pgxpool.Pool
-	db        DBTX
-	q         *sqlcgen.Queries
-	dims      *dimCache
-	verifier  core.AuthVerifier
-	recompute *CheckpointIntegrityStore
+	pool     *pgxpool.Pool
+	db       DBTX
+	q        *sqlcgen.Queries
+	dims     *dimCache
+	verifier core.AuthVerifier
 }
 
 // NewVerifiedBalanceStore creates a VerifiedBalanceStore backed by a
@@ -70,12 +69,11 @@ type VerifiedBalanceStore struct {
 // verifier at all).
 func NewVerifiedBalanceStore(pool *pgxpool.Pool, verifier core.AuthVerifier) *VerifiedBalanceStore {
 	return &VerifiedBalanceStore{
-		pool:      pool,
-		db:        pool,
-		q:         sqlcgen.New(pool),
-		dims:      dimCacheFor(pool),
-		verifier:  verifier,
-		recompute: NewCheckpointIntegrityStore(pool),
+		pool:     pool,
+		db:       pool,
+		q:        sqlcgen.New(pool),
+		dims:     dimCacheFor(pool),
+		verifier: verifier,
 	}
 }
 
@@ -88,12 +86,11 @@ func NewVerifiedBalanceStore(pool *pgxpool.Pool, verifier core.AuthVerifier) *Ve
 // single source of that wiring.
 func (s *VerifiedBalanceStore) WithDB(db DBTX) *VerifiedBalanceStore {
 	return &VerifiedBalanceStore{
-		dims:      dimCacheForTx(s.dims),
-		pool:      nil, // tx mode
-		db:        db,
-		q:         sqlcgen.New(db),
-		verifier:  s.verifier,
-		recompute: s.recompute.WithDB(db),
+		dims:     dimCacheForTx(s.dims),
+		pool:     nil, // tx mode
+		db:       db,
+		q:        sqlcgen.New(db),
+		verifier: s.verifier,
 	}
 }
 
@@ -183,9 +180,20 @@ func (s *VerifiedBalanceStore) VerifiedBalance(ctx context.Context, holder int64
 	}
 
 	// Every contributing journal (if any) just passed a live check against its
-	// current content -- trust the same checkpoint-independent recompute
-	// RecomputeBalance uses.
-	return s.recompute.RecomputeBalance(ctx, holder, currencyUID, classificationUID)
+	// current content. Sum exactly the rows listed -- and so verified --
+	// above, not a fresh RecomputeBalance: that ran as a separate statement
+	// with its own snapshot, so an unsigned journal committed while the
+	// verifier was running was counted in V without ever being verified, and
+	// min(V, E) then included it (I-49).
+	balance := decimal.Zero
+	for _, r := range rows {
+		amount, err := numericToDecimal(r.SignedAmount)
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("postgres: verified balance: entry id %d: convert amount: %w", r.EntryID, err)
+		}
+		balance = balance.Add(amount)
+	}
+	return balance, nil
 }
 
 // verifyJournalsNaively is the naive, pre-T4 per-journal check, now itself

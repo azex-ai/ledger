@@ -675,7 +675,7 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 			CurrencyUID:    rowCur.UID,
 			Amount:         amount,
 			Reason:         "expired",
-			IdempotencyKey: fmt.Sprintf("pending:expire:journal=%d", row.JournalID),
+			IdempotencyKey: fmt.Sprintf(core.IdempotencyPrefixPendingExpire+"journal=%d", row.JournalID),
 			Source:         "pending_timeout_sweeper",
 		})
 		if err != nil {

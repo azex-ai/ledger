@@ -31,6 +31,56 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### All HTTP write routes: reserved `idempotency_key` prefixes
+
+Every HTTP write route (`POST` / `PUT` / `PATCH` / `DELETE`; webhook callbacks
+excepted) now refuses a caller-supplied idempotency key starting with
+`deposit-`, `sweep-`, `webhook-`, `expire-`, `pending:expire:` or `reversal:`
+with `400` / `10001` (field `idempotency_key`), whether it arrives in the
+`Idempotency-Key` header or as the top-level `idempotency_key` body member
+(the body is read the way the handlers read it: the first JSON value, trailing
+bytes ignored). Those prefixes are the namespaces the ledger derives its own
+keys in (`core.IsSystemIdempotencyKey`, new `core.IdempotencyPrefixExpire`,
+`core.IdempotencyPrefixPendingExpire`, `core.IdempotencyPrefixReversal`);
+keys are table-wide unique, so a caller-held key there -- a booking under the
+sweep saga's next `sweep-<chain>-<token>-<nonce>`, a transition of the
+caller's own booking under `deposit-confirmed-<victim uid>`, a journal under
+`deposit-confirm-<victim uid>`, `expire-booking-<uid>`,
+`pending:expire:journal=<id>`, `reversal:<journal uid>:<reason>` -- made the
+system's own write fail with `ErrConflict` for good (for `reversal:`, a reorg
+auto-reversal was skipped silently). `POST /journals/{uid}/reverse` is
+unaffected: it already took no caller key; a `reverse-partial` caller whose
+own key started with `reversal:` must pick another. A client using one of these
+prefixes for its own keys must pick another (`deposit:` and similar are
+fine; note `ledger.NewIdempotencyKey("deposit-confirm")` yields
+`deposit-confirm:<hex>`, which is refused over HTTP). The RUNBOOK §15 manual
+recovery key is now `recover-sweep-<uid>-<tx hash>`. Library calls
+(`Booker`, `JournalWriter`, ...) are unchanged.
+
+### `POST /api/v1/bookings` / `.../transition`, `Booker.CreateBooking` / `Transition`: deposit-identity metadata is normalized; invalid values are refused
+
+Booking metadata that carries all three of `chain_id`, `tx_hash` and
+`txlog_seq` (the on-chain deposit identity, I-71) is stored in one spelling
+(`core.NormalizeDepositIdentityMetadata`): a `0x`/`0X`-prefixed `tx_hash`
+is lowercased, and a `chain_id` / `txlog_seq` that parses as a base-10
+integer is rewritten as `strconv.FormatInt` prints it (`01`, `+1` -> `1`).
+The stored metadata, the returned booking and the idempotency comparison all
+see the normalized values, so a retry in the original spelling resolves to
+the original booking, and a different-key booking naming the same log in
+another spelling is `409` / `ErrConflict` from the unique index. Only values
+that are not an identity are refused with `400` / `ErrInvalidInput`: a
+`tx_hash` without the `0x`/`0X` prefix (base58, bare hex), a
+non-numeric `chain_id` such as `solana-mainnet`, a padded ` 1`. This runs on
+create and on the merged metadata of every transition, over HTTP and in the
+library. Callers storing non-EVM identifiers under those three keys must
+rename their keys (any key set that is not all three is untouched). A
+consumer that reads metadata back sees the normalized spelling, not what it
+sent. Existing non-canonical rows are normalized by their next transition,
+which can collide with a canonical row for the same log; RUNBOOK §13 "Before
+deploying" lists them. (`core.ValidateDepositIdentityMetadata`, which
+refused instead, never shipped in a release and is replaced by
+`core.NormalizeDepositIdentityMetadata`.)
+
 ### `getBalances` / `useBalances` / `prefetchBalances`: currency is required
 
 The existing Go endpoint requires `currency_uid`; the SDK previously omitted

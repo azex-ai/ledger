@@ -99,6 +99,19 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		return nil, fmt.Errorf("postgres: create booking: %w", validationErr)
 	}
 
+	// One spelling of the deposit identity (I-71) from here on: the
+	// idempotency comparison, the INSERT and uq_bookings_deposit_identity all
+	// see the canonical values, so a retry in the caller's original spelling
+	// resolves to its booking and a different-key respelling collides.
+	// input is a copy; the caller's map is untouched (a rewrite clones).
+	normalized, err := core.NormalizeDepositIdentityMetadata(input.Metadata)
+	if err != nil {
+		retErr := fmt.Errorf("postgres: create booking: %w", err)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
+	}
+	input.Metadata = normalized
+
 	// Check idempotency
 	existing, err := s.q.GetBookingByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
@@ -336,6 +349,13 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		metadata = make(map[string]string)
 	}
 	maps.Copy(metadata, input.Metadata)
+	// The merge can complete or respell a deposit identity (I-71): normalize
+	// the result, not only the caller's half of it, before the UPDATE and the
+	// event row. (Transition's idempotency receipt does not carry metadata.)
+	metadata, err = core.NormalizeDepositIdentityMetadata(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: transition: booking %s: %w", input.BookingUID, err)
+	}
 
 	// Determine settled_amount: use input if non-zero, else keep existing
 	settledAmount := mustNumericToDecimal(op.SettledAmount)
