@@ -69,6 +69,12 @@ func TestChangelogListsBreakingGoAPIChanges(t *testing.T) {
 	if unreleased == "" {
 		t.Fatal("CHANGELOG.md has no \"## [Unreleased]\" section for this test to check against")
 	}
+	// Release prep moves [Unreleased] into a "## [X.Y.Z]" section before the
+	// vX.Y.Z tag exists; until it does, the diff is still against the previous
+	// tag, so that pending section counts as unreleased too.
+	if m := regexp.MustCompile(`(?m)^## \[(\d+\.\d+\.\d+)\]`).FindStringSubmatch(changelog); m != nil && "v"+m[1] != tag {
+		unreleased += extractMarkdownSection(changelog, m[0])
+	}
 
 	files := []string{"ledger.go"}
 	coreFiles, err := exec.Command("git", "ls-tree", "-r", "--name-only", "HEAD", "--", "core/").Output()
