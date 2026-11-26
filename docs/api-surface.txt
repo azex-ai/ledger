@@ -2895,6 +2895,7 @@ sqlcgen.ListContributingEntryVerdictsParams.CurrencyID = field int64
 sqlcgen.ListContributingEntryVerdictsRow = type struct
 sqlcgen.ListContributingEntryVerdictsRow.EntryID = field int64
 sqlcgen.ListContributingEntryVerdictsRow.JournalID = field int64
+sqlcgen.ListContributingEntryVerdictsRow.SignedAmount = field pgtype.Numeric
 sqlcgen.ListContributingEntryVerdictsRow.Verdict = field string
 sqlcgen.ListContributingJournalIDsParams = type struct
 sqlcgen.ListContributingJournalIDsParams.AccountHolder = field int64

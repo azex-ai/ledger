@@ -14,8 +14,10 @@ import (
 
 const listContributingEntryVerdicts = `-- name: ListContributingEntryVerdicts :many
 SELECT je.id AS entry_id, je.journal_id,
-       COALESCE(ea.auth_verdict, '') AS verdict
+       COALESCE(ea.auth_verdict, '') AS verdict,
+       ledger_signed_amount(c.normal_side, je.entry_type, je.amount) AS signed_amount
 FROM journal_entries je
+JOIN classifications c ON c.id = je.classification_id
 LEFT JOIN entry_attestations ea ON ea.entry_id = je.id
 WHERE je.account_holder = $1::bigint
   AND je.currency_id = $2::bigint
@@ -29,9 +31,10 @@ type ListContributingEntryVerdictsParams struct {
 }
 
 type ListContributingEntryVerdictsRow struct {
-	EntryID   int64  `json:"entry_id"`
-	JournalID int64  `json:"journal_id"`
-	Verdict   string `json:"verdict"`
+	EntryID      int64          `json:"entry_id"`
+	JournalID    int64          `json:"journal_id"`
+	Verdict      string         `json:"verdict"`
+	SignedAmount pgtype.Numeric `json:"signed_amount"`
 }
 
 // Every entry contributing to (account_holder, currency_id,
@@ -44,6 +47,12 @@ type ListContributingEntryVerdictsRow struct {
 // silently treated as authorized). Reuses idx_entries_account_id, the same
 // index integrity_verified_balance.sql's ListContributingJournalIDs already
 // relies on.
+//
+// signed_amount is each entry's contribution to the balance (the same
+// ledger_signed_amount RecomputeCheckpointFromEntries sums). The caller sums
+// THESE rows -- the set it verified -- rather than recomputing in a later
+// statement, whose fresh snapshot would also count an unsigned journal
+// committed while the verifier ran (I-49).
 func (q *Queries) ListContributingEntryVerdicts(ctx context.Context, arg ListContributingEntryVerdictsParams) ([]ListContributingEntryVerdictsRow, error) {
 	rows, err := q.db.Query(ctx, listContributingEntryVerdicts, arg.AccountHolder, arg.CurrencyID, arg.ClassificationID)
 	if err != nil {
@@ -53,7 +62,12 @@ func (q *Queries) ListContributingEntryVerdicts(ctx context.Context, arg ListCon
 	items := []ListContributingEntryVerdictsRow{}
 	for rows.Next() {
 		var i ListContributingEntryVerdictsRow
-		if err := rows.Scan(&i.EntryID, &i.JournalID, &i.Verdict); err != nil {
+		if err := rows.Scan(
+			&i.EntryID,
+			&i.JournalID,
+			&i.Verdict,
+			&i.SignedAmount,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
