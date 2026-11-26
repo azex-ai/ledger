@@ -1861,6 +1861,41 @@ lag, wrong contract address, log-parsing bug) than the reconciliation
 control being wrong — investigate the primary source before touching
 `ReconcileCeiling`.
 
+### Before deploying the I-71 spelling check: list non-canonical deposit identities
+
+From this release, a booking whose metadata holds all three of `chain_id`,
+`tx_hash`, `txlog_seq` must spell them canonically
+(`core.ValidateDepositIdentityMetadata`), and the check runs on every
+transition's merged metadata. An existing row that violates it cannot be
+transitioned after the deploy — recheck, review, expiry and manual moves all
+fail on it. **Before deploying**, run this read-only query:
+
+```sql
+SELECT uid, status, classification_id, created_at,
+       metadata->>'chain_id' AS chain_id, metadata->>'tx_hash' AS tx_hash,
+       metadata->>'txlog_seq' AS txlog_seq
+FROM bookings
+WHERE metadata ? 'chain_id' AND metadata ? 'tx_hash' AND metadata ? 'txlog_seq'
+  AND (left(metadata->>'tx_hash', 2) <> '0x'
+       OR metadata->>'tx_hash' <> lower(metadata->>'tx_hash')
+       OR NOT (CASE WHEN metadata->>'chain_id' ~ '^(0|-?[1-9][0-9]{0,18})$'
+                    THEN (metadata->>'chain_id')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
+                    ELSE false END)
+       OR NOT (CASE WHEN metadata->>'txlog_seq' ~ '^(0|-?[1-9][0-9]{0,18})$'
+                    THEN (metadata->>'txlog_seq')::numeric BETWEEN -9223372036854775808 AND 9223372036854775807
+                    ELSE false END));
+```
+
+Resolve every row it returns while the old binary still runs: a terminal row
+needs nothing (it is never transitioned again); a non-terminal row that
+duplicates another booking's identity once lowercased is a planted or
+accidental second spelling — transition it to `failed`; the only booking of a
+real transfer is transitioned with canonical values in `metadata` (the merge
+overwrites the stored spelling). A row of a non-deposit classification that
+stores non-EVM ids under these keys must be finished or failed before the
+deploy, and its writer moved to other key names (docs/BREAKING.md). Deploy
+when the query returns only terminal rows.
+
 ---
 
 ## 14. Onchain money-path metrics -- this library ships none of the alerting

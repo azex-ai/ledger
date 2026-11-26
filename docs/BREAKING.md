@@ -51,6 +51,22 @@ fine; note `ledger.NewIdempotencyKey("deposit-confirm")` yields
 recovery key is now `recover-sweep-<uid>-<tx hash>`. Library calls
 (`Booker`, `JournalWriter`, ...) are unchanged.
 
+### `POST /api/v1/bookings` / `.../transition`, `Booker.CreateBooking` / `Transition`: deposit-identity metadata must be canonical
+
+Booking metadata that carries all three of `chain_id`, `tx_hash` and
+`txlog_seq` (the on-chain deposit identity, I-71) is refused with `400` /
+`ErrInvalidInput` unless `tx_hash` is lowercase with a `0x` prefix and
+`chain_id` / `txlog_seq` are canonical base-10 integers (`1`, not `01`, `+1`
+or ` 1`). The check runs on create and on the merged metadata of every
+transition, over HTTP and in the library. This also refuses callers that
+store non-EVM identifiers under those three keys -- a tx id without `0x`
+(base58, bare hex), a non-numeric `chain_id` such as `solana-mainnet` -- and
+a custom channel adapter whose callback metadata carries an upper-case
+`tx_hash`. Such callers must rename their keys (any key set that is not all
+three is unchecked) or lowercase / prefix the values. Existing rows that
+violate the rule can no longer be transitioned; RUNBOOK §13 "Before
+deploying" lists them for resolution first.
+
 ### `getBalances` / `useBalances` / `prefetchBalances`: currency is required
 
 The existing Go endpoint requires `currency_uid`; the SDK previously omitted
