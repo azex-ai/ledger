@@ -260,10 +260,15 @@ Request:
 
 `expires_at` is optional (RFC 3339). `metadata` is a free-form JSON object.
 One exception: when it holds all three of `chain_id`, `tx_hash` and
-`txlog_seq` (an on-chain deposit identity, I-71), `tx_hash` must be lowercase
-with a `0x` prefix, and `chain_id` / `txlog_seq` must be canonical base-10
-integers (`1`, not `01` or `+1`). A non-canonical value gets `400`. The same
-check applies to the merged metadata of `POST /bookings/{uid}/transition`.
+`txlog_seq` (an on-chain deposit identity, I-71), the three are stored in one
+spelling: a `0x`/`0X`-prefixed `tx_hash` is lowercased, and a base-10
+integer `chain_id` / `txlog_seq` is rewritten as its plain form (`01`, `+1` ->
+`1`). The booking returned (and the idempotency comparison of a retry) uses
+the normalized values. A `tx_hash` without the `0x`/`0X` prefix, or a
+non-numeric `chain_id` / `txlog_seq`, gets `400`. The same applies to
+the merged metadata of `POST /bookings/{uid}/transition`; a create or
+transition whose normalized identity is already held by another booking gets
+`409`.
 
 `idempotency_key` must not start with `deposit-`, `sweep-`, `webhook-`,
 `expire-`, `pending:expire:` or `reversal:` (reserved on every write route — see "Idempotency" above); such a

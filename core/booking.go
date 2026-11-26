@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -104,7 +105,7 @@ func (i CreateBookingInput) Validate() error {
 	if err := validateFreeformFields("booking", "", i.Metadata); err != nil {
 		return err
 	}
-	if err := ValidateDepositIdentityMetadata(i.Metadata); err != nil {
+	if _, err := NormalizeDepositIdentityMetadata(i.Metadata); err != nil {
 		return err
 	}
 	if i.IdempotencyKey == "" {
@@ -113,38 +114,64 @@ func (i CreateBookingInput) Validate() error {
 	return nil
 }
 
-// ValidateDepositIdentityMetadata enforces one spelling for a booking's
-// on-chain deposit identity (I-71). When metadata carries all three of
-// chain_id, tx_hash and txlog_seq -- the rows uq_bookings_deposit_identity
-// constrains -- the values must be canonical: tx_hash lowercase with a "0x"
-// prefix, chain_id and txlog_seq base-10 integers exactly as
+// NormalizeDepositIdentityMetadata gives a booking's on-chain deposit
+// identity (I-71) one spelling. When metadata carries all three of chain_id,
+// tx_hash and txlog_seq -- the rows uq_bookings_deposit_identity constrains --
+// it returns metadata with those values rewritten to the canonical form:
+// tx_hash lowercased with a "0x" prefix, chain_id and txlog_seq as
 // strconv.FormatInt prints them. The unique index and the sibling lookup
 // compare this text verbatim, while the chain-side checks (ParseInt,
 // HexToHash, EqualFold) read "0xAB.."/"0Xab.." and "01"/"+1" as the same
-// log; a second spelling of a real transfer would otherwise slip past both
-// and be credited again. Rejected, never rewritten: the caller learns its
-// identity was not the one the ledger stores.
+// log; storing one spelling is what makes a second spelling of a real
+// transfer collide with the index instead of being credited again. Hashes
+// are case-insensitive identifiers, so a different case is the same value
+// and is normalized, not refused. A value that is not one -- a tx_hash
+// without a 0x/0X prefix, a chain_id or txlog_seq
+// that is not a base-10 integer -- is ErrInvalidInput; nothing is guessed.
 //
-// BookingStore calls this on create (via CreateBookingInput.Validate) and on
-// the merged metadata of every Transition, the two places booking metadata
-// is written.
-func ValidateDepositIdentityMetadata(md map[string]string) error {
+// md is never mutated: when a rewrite is needed the result is a copy,
+// otherwise md itself is returned. BookingStore applies this on create
+// (before the idempotency comparison and the INSERT) and to the merged
+// metadata of every Transition, the two places booking metadata is written;
+// CreateBookingInput.Validate calls it only for the refusal.
+func NormalizeDepositIdentityMetadata(md map[string]string) (map[string]string, error) {
 	chainID, hasChain := md["chain_id"]
 	txHash, hasTx := md["tx_hash"]
 	txLogSeq, hasSeq := md["txlog_seq"]
 	if !hasChain || !hasTx || !hasSeq {
-		return nil
+		return md, nil
 	}
-	if !strings.HasPrefix(txHash, "0x") || txHash != strings.ToLower(txHash) {
-		return fmt.Errorf("core: booking: metadata tx_hash %q must be lowercase with a 0x prefix: %w", txHash, ErrInvalidInput)
+	canonHash, ok := canonicalTxHash(txHash)
+	if !ok {
+		return nil, fmt.Errorf("core: booking: metadata tx_hash %q must have a 0x prefix: %w", txHash, ErrInvalidInput)
 	}
+	canon := map[string]string{"tx_hash": canonHash}
 	for _, f := range [...]struct{ name, value string }{{"chain_id", chainID}, {"txlog_seq", txLogSeq}} {
 		n, err := strconv.ParseInt(f.value, 10, 64)
-		if err != nil || strconv.FormatInt(n, 10) != f.value {
-			return fmt.Errorf("core: booking: metadata %s %q must be a canonical base-10 integer: %w", f.name, f.value, ErrInvalidInput)
+		if err != nil {
+			return nil, fmt.Errorf("core: booking: metadata %s %q must be a base-10 integer: %w", f.name, f.value, ErrInvalidInput)
 		}
+		canon[f.name] = strconv.FormatInt(n, 10)
 	}
-	return nil
+	if canon["tx_hash"] == txHash && canon["chain_id"] == chainID && canon["txlog_seq"] == txLogSeq {
+		return md, nil
+	}
+	out := maps.Clone(md)
+	maps.Copy(out, canon)
+	return out, nil
+}
+
+// canonicalTxHash lowercases a "0x"/"0X"-prefixed string; ok is false
+// without the prefix. The digits are not checked for hex and there is no
+// length requirement: the uniqueness argument needs neither (every spelling
+// the chain side reads as one hash lowercases to one string), the refusal
+// set before normalization never included them, and IngestDeposit's
+// fixtures use short non-hex placeholders such as "0xreorgtx".
+func canonicalTxHash(h string) (string, bool) {
+	if len(h) < 2 || h[0] != '0' || (h[1] != 'x' && h[1] != 'X') {
+		return "", false
+	}
+	return "0x" + strings.ToLower(h[2:]), true
 }
 
 // TransitionInput is the input to advance a booking's state.

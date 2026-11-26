@@ -7937,11 +7937,14 @@ booking may hold it. Two things enforce that, independently:
 Both halves compare the stored text, while the chain-side checks read
 `0xAB…`/`0Xab…` and `01`/`+1` as the same log. So there is one spelling:
 wherever booking metadata is written (create, and the merged result of every
-transition), a row carrying all three keys must have `tx_hash` in lowercase
-with a `0x` prefix, and `chain_id` and `txlog_seq` as base-10 integers exactly
-as `strconv.FormatInt` prints them. Anything else is refused with
-`core.ErrInvalidInput`, not rewritten. `IngestDeposit` already writes this
-form.
+transition), a row carrying all three keys is stored with `tx_hash` in
+lowercase with a `0x` prefix, and `chain_id` and `txlog_seq` as base-10
+integers exactly as `strconv.FormatInt` prints them. A spelling of the same
+value (hash case, a `0X` prefix, `01`, `+1`) is normalized to that form
+before the idempotency comparison and the write, so it collides with the
+index like the canonical spelling would; a value that is not one (no `0x`
+prefix, a non-numeric integer field) is refused with
+`core.ErrInvalidInput`. `IngestDeposit` already writes this form.
 
 The honest writer is unaffected: `IngestDeposit` resolves a re-observed
 transfer to the booking that already exists before attempting any insert, so
@@ -7993,16 +7996,21 @@ pre-credit corroboration reached through
 `service.Onchain.RunPendingRecheckOnce` and by
 `service.Onchain.IngestDeposit`, which uses it to say WHICH booking took a
 transfer it could not book. The single spelling is
-`core.ValidateDepositIdentityMetadata`, called from
-`core.CreateBookingInput.Validate` (so by `postgres.BookingStore.CreateBooking`)
-and by `postgres.BookingStore.Transition` on the merged metadata.
+`core.NormalizeDepositIdentityMetadata`, applied by
+`postgres.BookingStore.CreateBooking` before its idempotency lookup and
+INSERT and by `postgres.BookingStore.Transition` on the merged metadata
+before the UPDATE; `core.CreateBookingInput.Validate` calls it for the
+refusal of invalid values.
 
 **Pinned by**:
-- `core.TestValidateDepositIdentityMetadata_RejectsNonCanonicalSpelling` and
+- `core.TestNormalizeDepositIdentityMetadata` and
   `postgres.TestBookingStore_DepositIdentitySpelling` — hash case variants,
-  a `0X` prefix, and `01` / `+1` for `txlog_seq` and `chain_id` are refused
-  on create and on a transition's metadata merge. The canonical form is
-  accepted on both.
+  a `0X` prefix, and `01` / `+1` for `txlog_seq` and `chain_id` are stored
+  canonical on create and on a transition's metadata merge; a retry with the
+  same key and spelling returns the original booking; a different-key create
+  or a transition naming an already-held log in another spelling is
+  `ErrConflict`; a hash without the prefix and a
+  non-numeric `chain_id` / `txlog_seq` are refused.
 - `service.TestDepositIdentity_DuplicateBookingsAreRejectedAtInsert` — the
   reported attack statement refused, under both a channel name of the
   writer's choosing and the honest one, since the constraint is about the
