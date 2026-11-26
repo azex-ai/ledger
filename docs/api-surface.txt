@@ -635,6 +635,9 @@ core.HolderTxKindNone = const HolderTxKind
 core.HolderTxKindOther = const HolderTxKind
 core.HolderTxKindTransfer = const HolderTxKind
 core.HolderTxKindWithdrawal = const HolderTxKind
+core.IdempotencyPrefixDeposit = const = "deposit-"
+core.IdempotencyPrefixSweep = const = "sweep-"
+core.IdempotencyPrefixWebhook = const = "webhook-"
 core.InclusionProof = type struct
 core.InclusionProof.LeafIndex = field int64
 core.InclusionProof.Path = field [][]byte
@@ -652,6 +655,7 @@ core.IngestDeadLetter.UID = field string
 core.IsNopLogger = func(l Logger) bool
 core.IsRetryable = func(err error) bool
 core.IsSystemAccount = func(holder int64) bool
+core.IsSystemIdempotencyKey = func(key string) bool
 core.IsUserAccount = func(holder int64) bool
 core.Journal = type struct
 core.Journal.ActorID = field int64

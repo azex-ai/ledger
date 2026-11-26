@@ -247,6 +247,12 @@ Request:
 
 `expires_at` is optional (RFC 3339). `metadata` is a free-form JSON object.
 
+`idempotency_key` must not start with `deposit-`, `sweep-` or `webhook-`: those
+namespaces hold keys the ledger derives itself (deposit ingest, the sweep saga,
+webhook transitions — `core.IsSystemIdempotencyKey`), and a caller-held key there
+would make the system's own create conflict. Such a key is refused with `400`
+(`10001`, field `idempotency_key`).
+
 Response `201 Created`:
 
 ```json

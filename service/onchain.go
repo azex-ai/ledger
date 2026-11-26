@@ -1310,7 +1310,7 @@ func (o *Onchain) classifyIngestConflict(ctx context.Context, s core.DepositSigh
 }
 
 func depositIdempotencyKey(chainID int64, txHash string, txLogSeq int32) string {
-	return fmt.Sprintf("deposit-%d-%s-%d", chainID, txHash, txLogSeq)
+	return fmt.Sprintf(core.IdempotencyPrefixDeposit+"%d-%s-%d", chainID, txHash, txLogSeq)
 }
 
 // depositChannelRef qualifies a tx hash with its txlog_seq before using it as
@@ -1347,7 +1347,7 @@ func depositChannelRef(txHash string, txLogSeq int32) string {
 // (the second visit to a status resolving to the first visit's key) rather
 // than any error at all (F-m10).
 func depositTransitionKey(bookingUID string, toStatus core.Status) string {
-	return fmt.Sprintf("deposit-%s-%s", toStatus, bookingUID)
+	return fmt.Sprintf(core.IdempotencyPrefixDeposit+"%s-%s", toStatus, bookingUID)
 }
 
 // advanceConfirmation pushes booking through pending -> confirming ->
@@ -1625,7 +1625,7 @@ func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core
 	authorized, err := o.deps.TxComposer.AuthorizeTemplate(ctx, depositConfirmTemplate, core.TemplateParams{
 		HolderID:       booking.AccountHolder,
 		CurrencyUID:    booking.CurrencyUID,
-		IdempotencyKey: "deposit-confirm-" + booking.UID,
+		IdempotencyKey: core.IdempotencyPrefixDeposit + "confirm-" + booking.UID,
 		Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
 		Source:         onchainSource,
 		Metadata:       journalMeta,
@@ -3142,7 +3142,7 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 		return o.reviveFailedSweep(ctx, failed, nonce, eligible, policy)
 	}
 
-	idemKey := fmt.Sprintf("sweep-%d-%s-%d", policy.ChainID, policy.Token, nonce)
+	idemKey := fmt.Sprintf(core.IdempotencyPrefixSweep+"%d-%s-%d", policy.ChainID, policy.Token, nonce)
 	booking, err := o.deps.Booker.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: presets.SweepClassificationCode,
 		AccountHolder:      sweepSystemHolder(policy.ChainID),
@@ -3190,19 +3190,19 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 //     same reason: it identifies which failed cycle is being revived, so two
 //     distinct revivals (of two distinct failed cycles) never collide.
 func sweepSentKey(bookingUID, txHash string) string {
-	return fmt.Sprintf("sweep-sent-%s-%s", bookingUID, txHash)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"sent-%s-%s", bookingUID, txHash)
 }
 
 func sweepConfirmedKey(bookingUID, txHash string) string {
-	return fmt.Sprintf("sweep-confirmed-%s-%s", bookingUID, txHash)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"confirmed-%s-%s", bookingUID, txHash)
 }
 
 func sweepFailedKey(bookingUID, cycleChannelRef string) string {
-	return fmt.Sprintf("sweep-failed-%s-%s", bookingUID, cycleChannelRef)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"failed-%s-%s", bookingUID, cycleChannelRef)
 }
 
 func sweepReviveKey(failedBookingUID, failedCycleChannelRef string) string {
-	return fmt.Sprintf("sweep-revive-%s-%s", failedBookingUID, failedCycleChannelRef)
+	return fmt.Sprintf(core.IdempotencyPrefixSweep+"revive-%s-%s", failedBookingUID, failedCycleChannelRef)
 }
 
 // reviveFailedSweep re-drives a sweep booking that exhausted its gas-bump

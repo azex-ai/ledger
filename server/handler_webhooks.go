@@ -183,7 +183,7 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		ChannelRef:     payload.ChannelRef,
 		Amount:         payload.ActualAmount,
 		Metadata:       payload.Metadata,
-		IdempotencyKey: fmt.Sprintf("webhook-%s-%s-%s", payload.BookingUID, payload.Status, payload.ChannelRef),
+		IdempotencyKey: fmt.Sprintf(core.IdempotencyPrefixWebhook+"%s-%s-%s", payload.BookingUID, payload.Status, payload.ChannelRef),
 	})
 	if err != nil {
 		httpx.Error(w, err)

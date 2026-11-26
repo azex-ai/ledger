@@ -31,6 +31,17 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `POST /api/v1/bookings`: reserved `idempotency_key` prefixes
+
+The HTTP create path now refuses an `idempotency_key` starting with
+`deposit-`, `sweep-` or `webhook-` with `400` / `10001` (field
+`idempotency_key`). Those prefixes are the namespaces the ledger derives its
+own keys in (`core.IsSystemIdempotencyKey`); a caller-created booking holding,
+say, the sweep saga's next `sweep-<chain>-<token>-<nonce>` key stalled that
+saga with `ErrConflict` on every tick. A client using one of these prefixes for
+its own keys must pick another prefix (`deposit:` and similar are fine). The
+library `Booker.CreateBooking` is unchanged.
+
 ### `getBalances` / `useBalances` / `prefetchBalances`: currency is required
 
 The existing Go endpoint requires `currency_uid`; the SDK previously omitted

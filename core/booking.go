@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -29,6 +30,29 @@ type Booking struct {
 	ExpiresAt      time.Time         `json:"expires_at"`
 	CreatedAt      time.Time         `json:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+// Idempotency-key namespaces the ledger derives its own keys in. Booking and
+// event idempotency keys are each one table-wide UNIQUE namespace, and the
+// crypto-deposit add-on and the webhook handler mint keys from public values
+// (chain id, tx hash, token, the hot signer's pending nonce, booking uid).
+// A caller that could create a booking under such a key first would make the
+// system's own CreateBooking hit ErrConflict -- a sweep saga stalled for good,
+// a deposit dead-lettered -- so the HTTP create path refuses these prefixes
+// (IsSystemIdempotencyKey). Every derivation site builds its key from these
+// constants, so the reserved set and the derived set cannot drift apart.
+const (
+	IdempotencyPrefixDeposit = "deposit-"
+	IdempotencyPrefixSweep   = "sweep-"
+	IdempotencyPrefixWebhook = "webhook-"
+)
+
+// IsSystemIdempotencyKey reports whether key falls in a namespace the ledger
+// derives its own idempotency keys in (see IdempotencyPrefixDeposit).
+func IsSystemIdempotencyKey(key string) bool {
+	return strings.HasPrefix(key, IdempotencyPrefixDeposit) ||
+		strings.HasPrefix(key, IdempotencyPrefixSweep) ||
+		strings.HasPrefix(key, IdempotencyPrefixWebhook)
 }
 
 // CreateBookingInput is the input to create a new booking.

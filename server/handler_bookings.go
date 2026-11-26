@@ -138,6 +138,18 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// System-derived key namespaces are the ledger's own (sweep saga,
+	// deposit ingest, webhook transitions): a caller-created booking holding
+	// such a key would make the system's later CreateBooking conflict. The
+	// library path is trusted and not checked -- the add-on itself creates
+	// through it.
+	if core.IsSystemIdempotencyKey(req.IdempotencyKey) {
+		httpx.Error(w, httpx.ErrField("idempotency_key",
+			"the prefixes \""+core.IdempotencyPrefixDeposit+"\", \""+core.IdempotencyPrefixSweep+"\" and \""+
+				core.IdempotencyPrefixWebhook+"\" are reserved for keys the ledger derives itself"))
+		return
+	}
+
 	amount, err := parseWireAmount(req.Amount, "amount")
 	if err != nil {
 		httpx.Error(w, err)
