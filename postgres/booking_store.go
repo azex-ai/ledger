@@ -336,6 +336,11 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		metadata = make(map[string]string)
 	}
 	maps.Copy(metadata, input.Metadata)
+	// The merge can complete or respell a deposit identity (I-71): check the
+	// result, not only the caller's half of it.
+	if err := core.ValidateDepositIdentityMetadata(metadata); err != nil {
+		return nil, fmt.Errorf("postgres: transition: booking %s: %w", input.BookingUID, err)
+	}
 
 	// Determine settled_amount: use input if non-zero, else keep existing
 	settledAmount := mustNumericToDecimal(op.SettledAmount)

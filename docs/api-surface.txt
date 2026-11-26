@@ -1138,6 +1138,7 @@ core.TrialBalanceRow.TotalDebit = field decimal.Decimal
 core.UnboundedAutoCredit = var
 core.UserHolderFromSystem = func(holder int64) int64
 core.ValidateAmountMagnitude = func(scope, field string, amount decimal.Decimal) error
+core.ValidateDepositIdentityMetadata = func(md map[string]string) error
 core.ValidateReversalFraction = func(num, den int64) error
 core.VerifiedBalanceReader = type interface
 core.VerifiedBalanceReader.VerifiedBalance = interface method (ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error)

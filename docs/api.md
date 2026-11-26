@@ -246,6 +246,11 @@ Request:
 ```
 
 `expires_at` is optional (RFC 3339). `metadata` is a free-form JSON object.
+One exception: when it holds all three of `chain_id`, `tx_hash` and
+`txlog_seq` (an on-chain deposit identity, I-71), `tx_hash` must be lowercase
+with a `0x` prefix, and `chain_id` / `txlog_seq` must be canonical base-10
+integers (`1`, not `01` or `+1`). A non-canonical value gets `400`. The same
+check applies to the merged metadata of `POST /bookings/{uid}/transition`.
 
 `idempotency_key` must not start with `deposit-`, `sweep-` or `webhook-`: those
 namespaces hold keys the ledger derives itself (deposit ingest, the sweep saga,

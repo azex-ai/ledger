@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,8 +87,45 @@ func (i CreateBookingInput) Validate() error {
 	if err := validateFreeformFields("booking", "", i.Metadata); err != nil {
 		return err
 	}
+	if err := ValidateDepositIdentityMetadata(i.Metadata); err != nil {
+		return err
+	}
 	if i.IdempotencyKey == "" {
 		return fmt.Errorf("core: booking: idempotency key required: %w", ErrInvalidInput)
+	}
+	return nil
+}
+
+// ValidateDepositIdentityMetadata enforces one spelling for a booking's
+// on-chain deposit identity (I-71). When metadata carries all three of
+// chain_id, tx_hash and txlog_seq -- the rows uq_bookings_deposit_identity
+// constrains -- the values must be canonical: tx_hash lowercase with a "0x"
+// prefix, chain_id and txlog_seq base-10 integers exactly as
+// strconv.FormatInt prints them. The unique index and the sibling lookup
+// compare this text verbatim, while the chain-side checks (ParseInt,
+// HexToHash, EqualFold) read "0xAB.."/"0Xab.." and "01"/"+1" as the same
+// log; a second spelling of a real transfer would otherwise slip past both
+// and be credited again. Rejected, never rewritten: the caller learns its
+// identity was not the one the ledger stores.
+//
+// BookingStore calls this on create (via CreateBookingInput.Validate) and on
+// the merged metadata of every Transition, the two places booking metadata
+// is written.
+func ValidateDepositIdentityMetadata(md map[string]string) error {
+	chainID, hasChain := md["chain_id"]
+	txHash, hasTx := md["tx_hash"]
+	txLogSeq, hasSeq := md["txlog_seq"]
+	if !hasChain || !hasTx || !hasSeq {
+		return nil
+	}
+	if !strings.HasPrefix(txHash, "0x") || txHash != strings.ToLower(txHash) {
+		return fmt.Errorf("core: booking: metadata tx_hash %q must be lowercase with a 0x prefix: %w", txHash, ErrInvalidInput)
+	}
+	for _, f := range [...]struct{ name, value string }{{"chain_id", chainID}, {"txlog_seq", txLogSeq}} {
+		n, err := strconv.ParseInt(f.value, 10, 64)
+		if err != nil || strconv.FormatInt(n, 10) != f.value {
+			return fmt.Errorf("core: booking: metadata %s %q must be a canonical base-10 integer: %w", f.name, f.value, ErrInvalidInput)
+		}
 	}
 	return nil
 }
