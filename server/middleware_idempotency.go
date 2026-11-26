@@ -49,9 +49,15 @@ func idempotencyHeaderAliasMiddleware(next http.Handler) http.Handler {
 		}
 		_ = r.Body.Close()
 
-		var m map[string]any
+		// json.RawMessage values, not map[string]any: an untyped decode turns
+		// every JSON number into a float64, so an int64 above 2^53 (a holder
+		// id, an actor id) came back out of json.Marshal as its nearest
+		// double -- the request reached the handler naming a different
+		// holder than the client sent. Raw values are re-emitted unchanged;
+		// only the idempotency_key member is ever touched.
+		var m map[string]json.RawMessage
 		if len(bytes.TrimSpace(body)) == 0 {
-			m = map[string]any{}
+			m = map[string]json.RawMessage{}
 		} else if err := json.Unmarshal(body, &m); err != nil {
 			// Not a JSON object — let the handler produce its own decode error.
 			r.Body = io.NopCloser(bytes.NewReader(body))
@@ -72,13 +78,26 @@ func idempotencyHeaderAliasMiddleware(next http.Handler) http.Handler {
 		// the body's shape.
 		target := m
 
-		if existing, _ := target["idempotency_key"].(string); existing != "" {
+		var existing string
+		if raw, ok := target["idempotency_key"]; ok {
+			if err := json.Unmarshal(raw, &existing); err != nil {
+				// A non-string body value counts as absent and is replaced
+				// by the header, as the untyped type assertion did before.
+				existing = ""
+			}
+		}
+		if existing != "" {
 			if existing != key {
 				httpx.Error(w, httpx.ErrBadRequest("Idempotency-Key header and body idempotency_key disagree"))
 				return
 			}
 		} else {
-			target["idempotency_key"] = key
+			encodedKey, err := json.Marshal(key)
+			if err != nil {
+				httpx.Error(w, httpx.ErrBadRequest("invalid Idempotency-Key header"))
+				return
+			}
+			target["idempotency_key"] = encodedKey
 		}
 
 		rewritten, err := json.Marshal(m)
