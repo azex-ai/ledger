@@ -1394,7 +1394,7 @@ func (o *Onchain) advanceConfirmation(ctx context.Context, booking *core.Booking
 		// by the recheck loop, and the startup validation can only see
 		// tokens that are still configured. "Not configured" and "configured
 		// with no ceiling" must not be the same value.
-		tc, tokenConfigured := cfg.CreditTokens[booking.Metadata["token"]]
+		tc, tokenConfigured := cfg.CreditTokens[strings.ToLower(booking.Metadata["token"])]
 		reason, err := o.reviewGate(ctx, booking, tc, tokenConfigured)
 		if err != nil {
 			return nil, fmt.Errorf("advance to confirmed: review gate: %w", err)
