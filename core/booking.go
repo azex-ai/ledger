@@ -35,20 +35,31 @@ type Booking struct {
 
 // Idempotency-key namespaces the ledger derives its own keys in. Idempotency
 // keys are table-wide UNIQUE (bookings, transition receipts, journals,
-// reservations, ...), and the crypto-deposit add-on, the webhook handler and
-// the expiration worker mint keys from public values (chain id, tx hash,
-// token, the hot signer's pending nonce, booking / reservation uid). A caller
-// that wrote anything under such a key first would make the system's own
-// write hit ErrConflict for good -- a sweep saga stalled, a deposit never
-// confirmed, an expiry never applied -- so the HTTP layer refuses these
-// prefixes on every write route (IsSystemIdempotencyKey). Every derivation
-// site builds its key from these constants, so the reserved set and the
-// derived set cannot drift apart.
+// reservations, ...), and the crypto-deposit add-on, the webhook handler,
+// the expiration worker, the pending-timeout sweeper and ReverseJournal mint
+// keys from public or enumerable values (chain id, tx hash, token, the hot
+// signer's pending nonce, booking / reservation / journal uid, the sequential
+// journal id). A caller that wrote anything under such a key first would make
+// the system's own write hit ErrConflict for good -- a sweep saga stalled, a
+// deposit never confirmed, an expiry never applied, an expired pending never
+// cancelled, a reorg auto-reversal silently skipped -- so the HTTP layer
+// refuses these prefixes on every write route (IsSystemIdempotencyKey).
+//
+// The derivation sites that build their keys from these constants:
+// service/onchain.go (deposit ingest / transition / confirm, the sweep saga),
+// server/handler_webhooks.go, service/expiration.go,
+// postgres/pending_store.go (ExpirePending) and postgres/ledger_store.go
+// (ReverseJournal). A new system-derived key must get a constant here, not a
+// literal, or it is claimable over HTTP. Keys derived as a suffix of a
+// caller's own key (Exchange, Capture, the tolerance preset) need none: the
+// caller chose the prefix.
 const (
-	IdempotencyPrefixDeposit = "deposit-"
-	IdempotencyPrefixSweep   = "sweep-"
-	IdempotencyPrefixWebhook = "webhook-"
-	IdempotencyPrefixExpire  = "expire-"
+	IdempotencyPrefixDeposit       = "deposit-"
+	IdempotencyPrefixSweep         = "sweep-"
+	IdempotencyPrefixWebhook       = "webhook-"
+	IdempotencyPrefixExpire        = "expire-"
+	IdempotencyPrefixPendingExpire = "pending:expire:"
+	IdempotencyPrefixReversal      = "reversal:"
 )
 
 // IsSystemIdempotencyKey reports whether key falls in a namespace the ledger
@@ -57,7 +68,9 @@ func IsSystemIdempotencyKey(key string) bool {
 	return strings.HasPrefix(key, IdempotencyPrefixDeposit) ||
 		strings.HasPrefix(key, IdempotencyPrefixSweep) ||
 		strings.HasPrefix(key, IdempotencyPrefixWebhook) ||
-		strings.HasPrefix(key, IdempotencyPrefixExpire)
+		strings.HasPrefix(key, IdempotencyPrefixExpire) ||
+		strings.HasPrefix(key, IdempotencyPrefixPendingExpire) ||
+		strings.HasPrefix(key, IdempotencyPrefixReversal)
 }
 
 // CreateBookingInput is the input to create a new booking.

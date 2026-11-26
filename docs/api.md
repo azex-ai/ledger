@@ -162,10 +162,11 @@ reusing it with a different payload returns HTTP `409` / code `10901`.
 **Reserved prefixes.** On every write route (`POST` / `PUT` / `PATCH` /
 `DELETE`, webhooks excepted) a caller-supplied key — in the `Idempotency-Key`
 header or the top-level `idempotency_key` body member — must not start with
-`deposit-`, `sweep-`, `webhook-` or `expire-`. Those namespaces hold keys the
-ledger derives itself from public values (deposit ingest and confirmation,
-the sweep saga, webhook transitions, the expiration worker —
-`core.IsSystemIdempotencyKey`). Keys are table-wide unique, so a caller-held
+`deposit-`, `sweep-`, `webhook-`, `expire-`, `pending:expire:` or
+`reversal:`. Those namespaces hold keys the ledger derives itself from public
+or enumerable values (deposit ingest and confirmation, the sweep saga, webhook
+transitions, the expiration worker, the pending-timeout sweeper, full
+reversals — `core.IsSystemIdempotencyKey`). Keys are table-wide unique, so a caller-held
 key there (say `deposit-confirmed-<someone else's booking uid>` on a
 transition of your own booking) would make the system's own write conflict
 forever. Such a key is refused with `400` (`10001`, field `idempotency_key`).
@@ -264,8 +265,8 @@ with a `0x` prefix, and `chain_id` / `txlog_seq` must be canonical base-10
 integers (`1`, not `01` or `+1`). A non-canonical value gets `400`. The same
 check applies to the merged metadata of `POST /bookings/{uid}/transition`.
 
-`idempotency_key` must not start with `deposit-`, `sweep-`, `webhook-` or
-`expire-` (reserved on every write route — see "Idempotency" above); such a
+`idempotency_key` must not start with `deposit-`, `sweep-`, `webhook-`,
+`expire-`, `pending:expire:` or `reversal:` (reserved on every write route — see "Idempotency" above); such a
 key is refused with `400` (`10001`, field `idempotency_key`).
 
 Response `201 Created`:

@@ -68,6 +68,8 @@ func TestIdempotencyMiddleware_RefusesSystemKeysOnEveryWriteRoute(t *testing.T) 
 		"sweep-1-0xtoken-7",
 		"webhook-bk-victim-confirmed-ref",
 		"expire-booking-bk-victim",
+		"pending:expire:journal=42",
+		"reversal:j-victim:chain reorg auto-reverse: booking bk-victim",
 	}
 
 	for _, rt := range routes {

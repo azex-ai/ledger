@@ -31,20 +31,26 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
-### `POST /api/v1/bookings`: reserved `idempotency_key` prefixes
+### All HTTP write routes: reserved `idempotency_key` prefixes
 
 Every HTTP write route (`POST` / `PUT` / `PATCH` / `DELETE`; webhook callbacks
 excepted) now refuses a caller-supplied idempotency key starting with
-`deposit-`, `sweep-`, `webhook-` or `expire-` with `400` / `10001` (field
-`idempotency_key`), whether it arrives in the `Idempotency-Key` header or as
-the top-level `idempotency_key` body member. Those prefixes are the namespaces
-the ledger derives its own keys in (`core.IsSystemIdempotencyKey`, new
-`core.IdempotencyPrefixExpire`); keys are table-wide unique, so a caller-held
-key there -- a booking under the sweep saga's next
-`sweep-<chain>-<token>-<nonce>`, a transition of the caller's own booking
-under `deposit-confirmed-<victim uid>`, a journal under
-`deposit-confirm-<victim uid>`, `expire-booking-<uid>` -- made the system's
-own write fail with `ErrConflict` for good. A client using one of these
+`deposit-`, `sweep-`, `webhook-`, `expire-`, `pending:expire:` or `reversal:`
+with `400` / `10001` (field `idempotency_key`), whether it arrives in the
+`Idempotency-Key` header or as the top-level `idempotency_key` body member
+(the body is read the way the handlers read it: the first JSON value, trailing
+bytes ignored). Those prefixes are the namespaces the ledger derives its own
+keys in (`core.IsSystemIdempotencyKey`, new `core.IdempotencyPrefixExpire`,
+`core.IdempotencyPrefixPendingExpire`, `core.IdempotencyPrefixReversal`);
+keys are table-wide unique, so a caller-held key there -- a booking under the
+sweep saga's next `sweep-<chain>-<token>-<nonce>`, a transition of the
+caller's own booking under `deposit-confirmed-<victim uid>`, a journal under
+`deposit-confirm-<victim uid>`, `expire-booking-<uid>`,
+`pending:expire:journal=<id>`, `reversal:<journal uid>:<reason>` -- made the
+system's own write fail with `ErrConflict` for good (for `reversal:`, a reorg
+auto-reversal was skipped silently). `POST /journals/{uid}/reverse` is
+unaffected: it already took no caller key; a `reverse-partial` caller whose
+own key started with `reversal:` must pick another. A client using one of these
 prefixes for its own keys must pick another (`deposit:` and similar are
 fine; note `ledger.NewIdempotencyKey("deposit-confirm")` yields
 `deposit-confirm:<hex>`, which is refused over HTTP). The RUNBOOK §15 manual

@@ -30,9 +30,11 @@ import (
 //   - header and body disagree → 400, never a silent pick
 //
 // Reserved namespaces: idempotency keys are table-wide UNIQUE, and the
-// deposit add-on, the webhook handler and the expiration worker derive their
-// keys from public values (deposit-confirmed-<booking uid>,
-// expire-booking-<uid>, sweep-<chain>-<token>-<nonce>, ...). A caller that
+// deposit add-on, the webhook handler, the expiration worker, the
+// pending-timeout sweeper and ReverseJournal derive their keys from public
+// or enumerable values (deposit-confirmed-<booking uid>,
+// expire-booking-<uid>, sweep-<chain>-<token>-<nonce>,
+// pending:expire:journal=<id>, reversal:<journal uid>:<reason>, ...). A caller that
 // wrote anything under such a key first -- a transition on its own booking,
 // a journal -- would make the system's own write conflict forever. So every
 // mutating request (POST/PUT/PATCH/DELETE) carrying a reserved key, in the
@@ -186,7 +188,9 @@ func errReservedIdempotencyKey() error {
 	return httpx.ErrField("idempotency_key", "the prefixes "+
 		strconv.Quote(core.IdempotencyPrefixDeposit)+", "+
 		strconv.Quote(core.IdempotencyPrefixSweep)+", "+
-		strconv.Quote(core.IdempotencyPrefixWebhook)+" and "+
-		strconv.Quote(core.IdempotencyPrefixExpire)+
+		strconv.Quote(core.IdempotencyPrefixWebhook)+", "+
+		strconv.Quote(core.IdempotencyPrefixExpire)+", "+
+		strconv.Quote(core.IdempotencyPrefixPendingExpire)+" and "+
+		strconv.Quote(core.IdempotencyPrefixReversal)+
 		" are reserved for keys the ledger derives itself")
 }
