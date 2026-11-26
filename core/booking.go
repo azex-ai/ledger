@@ -33,19 +33,22 @@ type Booking struct {
 	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
-// Idempotency-key namespaces the ledger derives its own keys in. Booking and
-// event idempotency keys are each one table-wide UNIQUE namespace, and the
-// crypto-deposit add-on and the webhook handler mint keys from public values
-// (chain id, tx hash, token, the hot signer's pending nonce, booking uid).
-// A caller that could create a booking under such a key first would make the
-// system's own CreateBooking hit ErrConflict -- a sweep saga stalled for good,
-// a deposit dead-lettered -- so the HTTP create path refuses these prefixes
-// (IsSystemIdempotencyKey). Every derivation site builds its key from these
-// constants, so the reserved set and the derived set cannot drift apart.
+// Idempotency-key namespaces the ledger derives its own keys in. Idempotency
+// keys are table-wide UNIQUE (bookings, transition receipts, journals,
+// reservations, ...), and the crypto-deposit add-on, the webhook handler and
+// the expiration worker mint keys from public values (chain id, tx hash,
+// token, the hot signer's pending nonce, booking / reservation uid). A caller
+// that wrote anything under such a key first would make the system's own
+// write hit ErrConflict for good -- a sweep saga stalled, a deposit never
+// confirmed, an expiry never applied -- so the HTTP layer refuses these
+// prefixes on every write route (IsSystemIdempotencyKey). Every derivation
+// site builds its key from these constants, so the reserved set and the
+// derived set cannot drift apart.
 const (
 	IdempotencyPrefixDeposit = "deposit-"
 	IdempotencyPrefixSweep   = "sweep-"
 	IdempotencyPrefixWebhook = "webhook-"
+	IdempotencyPrefixExpire  = "expire-"
 )
 
 // IsSystemIdempotencyKey reports whether key falls in a namespace the ledger
@@ -53,7 +56,8 @@ const (
 func IsSystemIdempotencyKey(key string) bool {
 	return strings.HasPrefix(key, IdempotencyPrefixDeposit) ||
 		strings.HasPrefix(key, IdempotencyPrefixSweep) ||
-		strings.HasPrefix(key, IdempotencyPrefixWebhook)
+		strings.HasPrefix(key, IdempotencyPrefixWebhook) ||
+		strings.HasPrefix(key, IdempotencyPrefixExpire)
 }
 
 // CreateBookingInput is the input to create a new booking.

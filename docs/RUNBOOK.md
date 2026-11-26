@@ -2093,7 +2093,7 @@ conflict.
    ```
    POST /api/v1/bookings/{uid}/transition
    { "to_status": "sent", "channel_ref": "<recovered tx hash>",
-     "source": "onchain", "idempotency_key": "sweep-recover-<uid>-<tx hash>" }
+     "source": "onchain", "idempotency_key": "recover-sweep-<uid>-<tx hash>" }
    ```
    From there the ordinary loop takes over with no further manual steps: the
    next tick calls `TxIncluded` on that hash and either confirms the booking

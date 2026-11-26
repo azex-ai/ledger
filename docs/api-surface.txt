@@ -636,6 +636,7 @@ core.HolderTxKindOther = const HolderTxKind
 core.HolderTxKindTransfer = const HolderTxKind
 core.HolderTxKindWithdrawal = const HolderTxKind
 core.IdempotencyPrefixDeposit = const = "deposit-"
+core.IdempotencyPrefixExpire = const = "expire-"
 core.IdempotencyPrefixSweep = const = "sweep-"
 core.IdempotencyPrefixWebhook = const = "webhook-"
 core.InclusionProof = type struct
